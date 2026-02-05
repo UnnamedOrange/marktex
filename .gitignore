@@ -1,0 +1,12 @@
+## macOS
+.DS_Store
+
+## Windows
+desktop.ini
+
+## Rust
+/target
+lcov.info
+
+## Visual Studio Code
+.vscode/

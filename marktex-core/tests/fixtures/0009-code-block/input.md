@@ -1,0 +1,52 @@
+```
+#include <cstdio>
+
+int main(int argc, char** argv) {
+    printf("```");
+}
+```
+
+```cpp
+#include <cstdio>
+
+int main(int argc, char** argv) {
+    printf("```");
+}
+```
+
+lstlisting 的缩进强制归零。
+
+> ```verilog
+> module dot4(
+>   input  [7:0] a0, input [7:0] a1, input [7:0] a2, input [7:0] a3,
+>   input  [7:0] b0, input [7:0] b1, input [7:0] b2, input [7:0] b3,
+>   output [31:0] y
+> );
+>   wire [31:0] p0 = a0 * b0;
+>   wire [31:0] p1 = a1 * b1;
+>   wire [31:0] p2 = a2 * b2;
+>   wire [31:0] p3 = a3 * b3;
+>
+>   assign y = p0 + p1 + p2 + p3;
+> endmodule
+> ```
+
+> ```verilog
+> module dotany(
+>   input        clk,
+>   input        rst_n,
+>   input        clear,
+>   input        en,
+>   input  [7:0] a,
+>   input  [7:0] b,
+>   output reg [31:0] y
+> );
+>   wire [31:0] p = a * b;
+>
+>   always @(posedge clk or negedge rst_n) begin
+>     if (!rst_n)      y <= 32'd0;
+>     else if (clear)  y <= 32'd0;
+>     else if (en)     y <= y + p;
+>   end
+> endmodule
+> ```

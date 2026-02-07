@@ -1,0 +1,79 @@
+即：$\vb{f}$ 是一个 $60$ 元 $24$ 维的向量函数。设其输入变量为 $\vb*{y} \in \R^{60}$，输出变量为 $\vb*{z} \in \R^{24}$，计算图上的正向传播可以直接按运算 $\vb{f}$ 定义的规则完成，用数学公式表示如下。
+$$
+\vb*{z} = \vb{f}(\vb*{y})
+$$
+设计算图最终的输出变量为一个标量 $L$。讨论反向传播之前，需要先明确输出变量 $L$ 关于各变量 $\vb*{y}, \vb*{z}$ 的偏导数，以及 $\vb*{z}$ 关于 $\vb*{y}$ 的偏导数的含义。设向量 $\vb*{y}, \vb*{z}$ 可以展开为如下形式。
+$$
+\vb*{y} = \mqty[y_1 & y_2 & \cdots & y_{60}]^T
+$$
+
+$$
+\vb*{z} = \mqty[z_1 & z_2 & \cdots & z_{24}]^T
+$$
+
+在某个原始输入 $\vb*{x}_0$ 下，输出变量 $L$ 关于变量 $\vb*{z}$ 的偏导数被定义为：
+$$
+\eval{\textcolor{red}{\pdv{L}{\vb*{z}}}}_{\vb*{x}_0} \triangleq \eval{\grad_{\vb*{z}} L}_{\vb*{x}_0} = \mqty[\eval{\pdv{L}{z_1}}_{\vb*{x}_0} & \eval{\pdv{L}{z_2}}_{\vb*{x}_0} & \cdots & \eval{\pdv{L}{z_{24}}}_{\vb*{x}_0}]^T
+$$
+
+$$
+\begin{aligned}
+  \eval{\biggl( \pdv{L}{\vb*{W}} \biggr)^T}_{\vb*{x}_0} &= \eval{\biggl( \pdv{L}{\vb*{z}} \biggr)^T}_{\vb*{x}_0} \cdot \eval{\pdv{\vb*{z}}{\vb*{W}}}_{\vb*{W}_0, \vb*{y}_0}
+  \\&=
+  \begin{pmatrix}
+    \pdv{L}{z_1} & \pdv{L}{z_2} & \cdots & \pdv{L}{z_{10}}
+  \end{pmatrix}
+  \begin{pmatrix}
+    \pdv{z_1}{W_{1, 1}} & \pdv{z_1}{W_{1, 2}} & \cdots & \pdv{z_1}{W_{10, 64}}
+    \\
+    \pdv{z_2}{W_{1, 1}} & \pdv{z_2}{W_{1, 2}} & \cdots & \pdv{z_2}{W_{10, 64}}
+    \\
+    \vdots & \vdots & & \vdots
+    \\
+    \pdv{z_{10}}{W_{1, 1}} & \pdv{z_{10}}{W_{1, 2}} & \cdots & \pdv{z_{10}}{W_{10, 64}}
+  \end{pmatrix}_{10 \times 640}
+  \\&=
+  \begin{pmatrix}
+    \pdv{L}{z_1} & \pdv{L}{z_2} & \cdots & \pdv{L}{z_{10}}
+  \end{pmatrix}
+  \begin{pmatrix}
+    \vb*{y}^T & \vb*{0}_{1 \times 64} & \cdots & \vb*{0}_{1 \times 64}
+    \\
+    \vb*{0}_{1 \times 64} & \vb*{y}^T & \cdots & \vb*{0}_{1 \times 64}
+    \\
+    \vdots & \vdots & & \vdots
+    \\
+    \vb*{0}_{1 \times 64} & \vb*{0}_{1 \times 64} & \cdots & \vb*{y}^T
+  \end{pmatrix} \pod{\text{$\vb*{y}^T$ 是 $(y_1, y_2, \ldots, y_{64})$}}
+  \\&=
+  \begin{pmatrix}
+    \pdv{L}{z_1} \cdot y_1 & \pdv{L}{z_1} \cdot y_2 & \cdots & \pdv{L}{z_{10}} \cdot y_{64}
+  \end{pmatrix}_{1 \times 640}
+\end{aligned}
+$$
+
+$$
+a
+=
+b
+$$
+
+$$
+a
+
+b
+$$
+*测试对数学块的正确处理*
+
+@@MARKTEX_MATH_BLOCK_0@@
+
+$$
+a
+$$
+
+$z_{\text{$(x \$ y)$ ok}}$
+
+`**a **`!
+$**a **!$
+
+math1: $z_{\text{$(x * y)$ ok}} \ne 1$

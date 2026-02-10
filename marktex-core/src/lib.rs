@@ -72,7 +72,7 @@ fn render_inlines<'a>(
                 }
             }
             comrak::nodes::NodeValue::Code(code) => {
-                out.push_str(&code.literal);
+                out.push_str(&render_inline_code(&code.literal));
             }
             comrak::nodes::NodeValue::Emph => {
                 if let Some(inner) = emph_as_strong_emph(child, preprocessed) {
@@ -267,6 +267,20 @@ fn render_display_math(literal: &str) -> String {
     }
     out.push_str("$$");
     out
+}
+
+fn render_inline_code(literal: &str) -> String {
+    let delimiter = if !literal.contains('|') {
+        '|'
+    } else if !literal.contains('`') {
+        '`'
+    } else if !literal.contains('!') {
+        '!'
+    } else {
+        '|'
+    };
+
+    format!("\\lstinline{delimiter}{literal}{delimiter}")
 }
 
 fn render_block_quote<'a>(

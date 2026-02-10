@@ -39,6 +39,7 @@ fn comrak_options() -> comrak::Options<'static> {
     let mut options = comrak::Options::default();
     options.extension.alerts = true;
     options.extension.autolink = true;
+    options.extension.cjk_friendly_emphasis = true;
     options.extension.highlight = true;
     options.extension.math_dollars = true;
     options.extension.strikethrough = true;

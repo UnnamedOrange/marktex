@@ -15,7 +15,10 @@ pub fn compile_str(markdown: &str) -> Result<String> {
     let mut blocks = Vec::new();
     for node in root.children() {
         if let Some(block) = render_block(node, 0, &preprocessed) {
-            blocks.push(block);
+            blocks.push(RenderedBlock {
+                sourcepos: Some(node.data.borrow().sourcepos),
+                text: block,
+            });
         }
     }
 
@@ -23,7 +26,33 @@ pub fn compile_str(markdown: &str) -> Result<String> {
         return Ok(String::new());
     }
 
-    Ok(format!("{}\n", blocks.join("\n\n")))
+    let mut out = String::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if index > 0 {
+            out.push_str(block_separator(&blocks[index - 1], block));
+        }
+        out.push_str(&block.text);
+    }
+    out.push('\n');
+    Ok(out)
+}
+
+struct RenderedBlock {
+    sourcepos: Option<comrak::nodes::Sourcepos>,
+    text: String,
+}
+
+fn block_separator(prev: &RenderedBlock, next: &RenderedBlock) -> &'static str {
+    match (prev.sourcepos, next.sourcepos) {
+        (Some(prev), Some(next)) => {
+            if next.start.line > prev.end.line + 1 {
+                "\n\n"
+            } else {
+                "\n"
+            }
+        }
+        _ => "\n\n",
+    }
 }
 
 fn render_block<'a>(
@@ -117,6 +146,8 @@ fn render_inlines<'a>(
                 if let Some(image) = parse_html_img_tag(html) {
                     let include = render_includegraphics(&image.src, image.option);
                     out.push_str(&render_figure(0, &include));
+                } else if let Some(content) = parse_html_center_tag(html) {
+                    out.push_str(&render_center(0, &content));
                 }
             }
             comrak::nodes::NodeValue::Emph => {
@@ -335,18 +366,22 @@ fn render_code_block(code_block: &comrak::nodes::NodeCodeBlock) -> String {
 
 fn render_html_block(html: &comrak::nodes::NodeHtmlBlock, indent: usize) -> Option<String> {
     let images = parse_html_img_tags(&html.literal);
-    if images.is_empty() {
-        return None;
+    if !images.is_empty() {
+        let figures = images
+            .into_iter()
+            .map(|image| {
+                let include = render_includegraphics(&image.src, image.option);
+                render_figure(indent, &include)
+            })
+            .collect::<Vec<_>>();
+        return Some(figures.join("\n"));
     }
 
-    let figures = images
-        .into_iter()
-        .map(|image| {
-            let include = render_includegraphics(&image.src, image.option);
-            render_figure(indent, &include)
-        })
-        .collect::<Vec<_>>();
-    Some(figures.join("\n"))
+    if let Some(content) = parse_html_center_tag(&html.literal) {
+        return Some(render_center(indent, &content));
+    }
+
+    None
 }
 
 fn escape_latex_path(path: &str) -> String {
@@ -408,6 +443,14 @@ fn render_figure(indent: usize, includegraphics: &str) -> String {
     lines.join("\n")
 }
 
+fn render_center(indent: usize, content: &str) -> String {
+    let mut lines = Vec::new();
+    lines.push(indent_line(indent, "\\begin{center}"));
+    lines.push(indent_line(indent + 4, content));
+    lines.push(indent_line(indent, "\\end{center}"));
+    lines.join("\n")
+}
+
 struct HtmlImage {
     src: String,
     option: Option<IncludeGraphicsOption>,
@@ -447,6 +490,12 @@ fn parse_html_img_tags(html: &str) -> Vec<HtmlImage> {
     }
 
     out
+}
+
+fn parse_html_center_tag(html: &str) -> Option<String> {
+    let html = html.trim();
+    let content = html.strip_prefix("<center>")?.strip_suffix("</center>")?;
+    Some(content.trim().to_string())
 }
 
 fn extract_html_attr_value(html: &str, attr: &str) -> Option<String> {

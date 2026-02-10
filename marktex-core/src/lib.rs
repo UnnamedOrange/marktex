@@ -335,6 +335,10 @@ fn emph_as_strong_emph<'a>(
 
 fn render_display_math(literal: &str) -> String {
     let literal = literal.strip_prefix('\n').unwrap_or(literal);
+    if is_top_level_display_math_environment(literal) {
+        return literal.strip_suffix('\n').unwrap_or(literal).to_string();
+    }
+
     let mut out = String::new();
     out.push_str("$$\n");
     out.push_str(literal);
@@ -343,6 +347,35 @@ fn render_display_math(literal: &str) -> String {
     }
     out.push_str("$$");
     out
+}
+
+fn is_top_level_display_math_environment(literal: &str) -> bool {
+    let env = literal
+        .trim_start()
+        .strip_prefix("\\begin{")
+        .and_then(|rest| rest.split_once('}'))
+        .map(|(env, _)| env);
+
+    let Some(env) = env else {
+        return false;
+    };
+
+    let supported = matches!(
+        env,
+        "align"
+            | "align*"
+            | "equation"
+            | "equation*"
+            | "alignat"
+            | "alignat*"
+            | "gather"
+            | "gather*"
+    );
+    if !supported {
+        return false;
+    }
+
+    literal.trim_end().ends_with(&format!("\\end{{{env}}}"))
 }
 
 fn render_code_block(code_block: &comrak::nodes::NodeCodeBlock) -> String {

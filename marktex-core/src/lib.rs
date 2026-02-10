@@ -39,7 +39,9 @@ fn comrak_options() -> comrak::Options<'static> {
     let mut options = comrak::Options::default();
     options.extension.alerts = true;
     options.extension.autolink = true;
+    options.extension.highlight = true;
     options.extension.math_dollars = true;
+    options.extension.strikethrough = true;
     options.extension.table = true;
     options.parse.ignore_setext = true;
     options
@@ -97,6 +99,7 @@ fn render_block<'a>(
         comrak::nodes::NodeValue::HtmlBlock(html) => render_html_block(html, indent, preprocessed),
         comrak::nodes::NodeValue::List(list) => Some(render_list(node, indent, list, preprocessed)),
         comrak::nodes::NodeValue::Table(table) => Some(render_table(node, indent, table, preprocessed)),
+        comrak::nodes::NodeValue::ThematicBreak => Some(indent_line(indent, "\\bigskip")),
         _ => None,
     }
 }
@@ -243,6 +246,16 @@ fn render_inlines_with_references<'a>(
                 flush_pending_cites(&mut out, &mut pending_cites);
                 let inner = render_inlines_with_references(child, preprocessed, allow_footnotes);
                 out.push_str(&format!("\\textbf{{{inner}}}"));
+            }
+            comrak::nodes::NodeValue::Strikethrough => {
+                flush_pending_cites(&mut out, &mut pending_cites);
+                let inner = render_inlines_with_references(child, preprocessed, allow_footnotes);
+                out.push_str(&format!("\\sout{{{inner}}}"));
+            }
+            comrak::nodes::NodeValue::Highlight => {
+                flush_pending_cites(&mut out, &mut pending_cites);
+                let inner = render_inlines_with_references(child, preprocessed, allow_footnotes);
+                out.push_str(&format!("\\hl{{{inner}}}"));
             }
             comrak::nodes::NodeValue::Math(math) => {
                 flush_pending_cites(&mut out, &mut pending_cites);

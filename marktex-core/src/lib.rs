@@ -8,6 +8,7 @@ pub fn compile_str(markdown: &str) -> Result<String> {
     let preprocessed = preprocess_markdown(markdown);
     let arena = comrak::Arena::new();
     let mut options = comrak::Options::default();
+    options.extension.autolink = true;
     options.extension.math_dollars = true;
     options.extension.table = true;
     options.parse.ignore_setext = true;
@@ -150,6 +151,20 @@ fn render_inlines<'a>(
                     out.push_str(&render_figure(0, &include));
                 } else if let Some(content) = parse_html_center_tag(html) {
                     out.push_str(&render_center(0, &content));
+                }
+            }
+            comrak::nodes::NodeValue::Link(link) => {
+                let url = link.url.as_str();
+                if url.starts_with('#') {
+                    let text = render_inlines(child, preprocessed);
+                    out.push_str(&text);
+                } else if link_text_is_exact_url(child, url) {
+                    let (url, suffix) = split_trailing_url_punctuation(url);
+                    out.push_str(&format!("\\url{{{url}}}{suffix}"));
+                } else {
+                    let text = render_inlines(child, preprocessed);
+                    let url = escape_latex_href_url(url);
+                    out.push_str(&format!("\\href{{{url}}}{{{text}}}"));
                 }
             }
             comrak::nodes::NodeValue::Emph => {
@@ -391,7 +406,98 @@ fn is_trailing_closing_strong_suffix_char(ch: char) -> bool {
     !ch.is_whitespace() && !ch.is_alphanumeric()
 }
 
-fn push_text(out: &mut String, text: &str, trailing_space_sentinel: char) {
+fn strip_disabled_header_anchor_links(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some(rel_open) = text[cursor..].find('[') {
+        let open = cursor + rel_open;
+        out.push_str(&text[cursor..open]);
+        if is_escaped_at(text, open) {
+            out.push('[');
+            cursor = open + '['.len_utf8();
+            continue;
+        }
+
+        let Some(close) = find_unescaped_char(text, open + '['.len_utf8(), ']') else {
+            out.push_str(&text[open..]);
+            cursor = text.len();
+            break;
+        };
+        let label = &text[open + '['.len_utf8()..close];
+        let after_close = close + ']'.len_utf8();
+        if text[after_close..].starts_with('(') {
+            let dest_start = after_close + '('.len_utf8();
+            if let Some(dest_end) = find_link_destination_end(text, dest_start) {
+                let dest = &text[dest_start..dest_end];
+                if dest.starts_with('#') && dest.chars().any(|ch| ch.is_whitespace()) {
+                    out.push_str(label);
+                } else {
+                    out.push_str(&text[open..dest_end + ')'.len_utf8()]);
+                }
+                cursor = dest_end + ')'.len_utf8();
+                continue;
+            }
+        }
+
+        out.push('[');
+        cursor = open + '['.len_utf8();
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+fn is_escaped_at(text: &str, index: usize) -> bool {
+    let mut backslashes = 0usize;
+    for ch in text[..index].chars().rev() {
+        if ch == '\\' {
+            backslashes += 1;
+        } else {
+            break;
+        }
+    }
+    backslashes % 2 == 1
+}
+
+fn find_unescaped_char(text: &str, start: usize, target: char) -> Option<usize> {
+    let mut backslashes = 0usize;
+    for (offset, ch) in text[start..].char_indices() {
+        match ch {
+            '\\' => backslashes += 1,
+            _ => {
+                if ch == target && backslashes % 2 == 0 {
+                    return Some(start + offset);
+                }
+                backslashes = 0;
+            }
+        }
+    }
+    None
+}
+
+fn find_link_destination_end(text: &str, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut backslashes = 0usize;
+    for (offset, ch) in text[start..].char_indices() {
+        match ch {
+            '\\' => backslashes += 1,
+            '(' if backslashes % 2 == 0 => {
+                depth += 1;
+                backslashes = 0;
+            }
+            ')' if backslashes % 2 == 0 => {
+                if depth == 0 {
+                    return Some(start + offset);
+                }
+                depth -= 1;
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
+    }
+    None
+}
+
+fn push_raw_text(out: &mut String, text: &str, trailing_space_sentinel: char) {
     for ch in text.chars() {
         if ch == trailing_space_sentinel {
             out.push(' ');
@@ -399,6 +505,11 @@ fn push_text(out: &mut String, text: &str, trailing_space_sentinel: char) {
             out.push(ch);
         }
     }
+}
+
+fn push_text(out: &mut String, text: &str, trailing_space_sentinel: char) {
+    let text = strip_disabled_header_anchor_links(text);
+    push_raw_text(out, &text, trailing_space_sentinel);
 }
 
 fn emph_as_strong_emph<'a>(
@@ -551,6 +662,55 @@ fn format_table_row(cells: &[String]) -> String {
         out.pop();
     }
 
+    out
+}
+
+fn split_trailing_url_punctuation(url: &str) -> (String, String) {
+    let mut end = url.len();
+    while end > 0 {
+        let last = url[..end].chars().last().unwrap();
+        let should_strip = matches!(
+            last,
+            '.' | ',' | ':' | ';' | '!' | '?' | '。' | '，' | '：' | '；' | '！' | '？'
+        );
+        if !should_strip {
+            break;
+        }
+        end -= last.len_utf8();
+    }
+
+    let (base, suffix) = url.split_at(end);
+    (base.to_string(), suffix.to_string())
+}
+
+fn link_text_is_exact_url<'a>(node: &'a comrak::nodes::AstNode<'a>, url: &str) -> bool {
+    let mut children = node.children();
+    let Some(only) = children.next() else {
+        return false;
+    };
+    if children.next().is_some() {
+        return false;
+    }
+
+    matches!(
+        &only.data.borrow().value,
+        comrak::nodes::NodeValue::Text(text) if text == url
+    )
+}
+
+fn escape_latex_href_url(url: &str) -> String {
+    // TeX scans macro arguments before hyperref/url packages can sanitize them,
+    // so we must escape characters that would otherwise break argument parsing.
+    let mut out = String::new();
+    for ch in url.chars() {
+        match ch {
+            '_' => out.push_str("\\_"),
+            '&' => out.push_str("\\&"),
+            '#' => out.push_str("\\#"),
+            '%' => out.push_str("\\%"),
+            _ => out.push(ch),
+        }
+    }
     out
 }
 

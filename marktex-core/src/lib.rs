@@ -52,6 +52,7 @@ fn render_block<'a>(
         comrak::nodes::NodeValue::BlockQuote => {
             Some(render_block_quote(node, indent, preprocessed))
         }
+        comrak::nodes::NodeValue::CodeBlock(code_block) => Some(render_code_block(code_block)),
         comrak::nodes::NodeValue::List(list) => Some(render_list(node, indent, list, preprocessed)),
         _ => None,
     }
@@ -266,6 +267,25 @@ fn render_display_math(literal: &str) -> String {
         out.push('\n');
     }
     out.push_str("$$");
+    out
+}
+
+fn render_code_block(code_block: &comrak::nodes::NodeCodeBlock) -> String {
+    let info = code_block.info.trim();
+    let language = info.split_whitespace().next().unwrap_or("");
+
+    let mut out = String::new();
+    if language.is_empty() {
+        out.push_str("\\begin{lstlisting}\n");
+    } else {
+        out.push_str("\\begin{lstlisting}[language=");
+        out.push_str(language);
+        out.push_str("]\n");
+    }
+
+    out.push_str(code_block.literal.trim_end_matches('\n'));
+    out.push('\n');
+    out.push_str("\\end{lstlisting}");
     out
 }
 

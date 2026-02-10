@@ -370,7 +370,7 @@ fn render_item<'a>(
     match &first.data.borrow().value {
         comrak::nodes::NodeValue::Paragraph => {
             let content = render_inlines(first, preprocessed);
-            lines.push(indent_line(indent, format!("\\item {content}")));
+            lines.extend(render_item_paragraph(indent, &content));
         }
         comrak::nodes::NodeValue::List(list) => {
             lines.push(indent_line(indent, "\\item"));
@@ -387,9 +387,17 @@ fn render_item<'a>(
         }
     }
 
+    let mut prev_end_line = first.data.borrow().sourcepos.end.line;
     for block in blocks {
+        let start_line = block.data.borrow().sourcepos.start.line;
+        let blank_line_before = start_line > prev_end_line + 1;
+        prev_end_line = block.data.borrow().sourcepos.end.line;
+
         match &block.data.borrow().value {
             comrak::nodes::NodeValue::List(list) => {
+                if blank_line_before {
+                    lines.push(String::new());
+                }
                 let nested = render_list(block, indent, list, preprocessed);
                 lines.extend(nested.split('\n').map(|l| l.to_string()));
             }
@@ -401,6 +409,28 @@ fn render_item<'a>(
                     lines.extend(rendered.split('\n').map(|l| l.to_string()));
                 }
             }
+        }
+    }
+
+    lines
+}
+
+fn render_item_paragraph(indent: usize, content: &str) -> Vec<String> {
+    let mut iter = content.split('\n');
+    let first_line = iter.next().unwrap_or("");
+    let mut lines = Vec::new();
+
+    if first_line.is_empty() {
+        lines.push(indent_line(indent, "\\item"));
+    } else {
+        lines.push(indent_line(indent, format!("\\item {first_line}")));
+    }
+
+    for line in iter {
+        if line.is_empty() {
+            lines.push(String::new());
+        } else {
+            lines.push(indent_line(indent + 4, line));
         }
     }
 

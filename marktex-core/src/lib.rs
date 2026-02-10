@@ -12,7 +12,7 @@ pub fn compile_str(markdown: &str) -> Result<String> {
 
     let mut blocks = Vec::new();
     for node in root.children() {
-        if let Some(block) = render_block(node) {
+        if let Some(block) = render_block(node, 0) {
             blocks.push(block);
         }
     }
@@ -24,9 +24,9 @@ pub fn compile_str(markdown: &str) -> Result<String> {
     Ok(format!("{}\n", blocks.join("\n\n")))
 }
 
-fn render_block<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<String> {
+fn render_block<'a>(node: &'a comrak::nodes::AstNode<'a>, indent: usize) -> Option<String> {
     match &node.data.borrow().value {
-        comrak::nodes::NodeValue::Paragraph => Some(render_inlines(node)),
+        comrak::nodes::NodeValue::Paragraph => Some(indent_multiline(indent, render_inlines(node))),
         comrak::nodes::NodeValue::Heading(heading) => {
             let content = render_inlines(node);
             let command = match heading.level {
@@ -34,10 +34,14 @@ fn render_block<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<String> {
                 2 => "section",
                 3 => "subsection",
                 4 => "subsubsection",
-                _ => return Some(content),
+                _ => return Some(indent_multiline(indent, content)),
             };
-            Some(format!("\\{command}{{{content}}}"))
+            Some(indent_multiline(
+                indent,
+                format!("\\{command}{{{content}}}"),
+            ))
         }
+        comrak::nodes::NodeValue::List(list) => Some(render_list(node, indent, list)),
         _ => None,
     }
 }
@@ -151,4 +155,109 @@ fn emph_as_strong_emph<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<Strin
 
     matches!(child.data.borrow().value, comrak::nodes::NodeValue::Strong)
         .then(|| render_inlines(child))
+}
+
+fn render_list<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    indent: usize,
+    list: &comrak::nodes::NodeList,
+) -> String {
+    let env = match list.list_type {
+        comrak::nodes::ListType::Bullet => "itemize",
+        comrak::nodes::ListType::Ordered => "enumerate",
+    };
+
+    let item_indent = indent + 4;
+    let items = node.children().collect::<Vec<_>>();
+
+    let mut lines = Vec::new();
+    lines.push(indent_line(indent, format!("\\begin{{{env}}}")));
+
+    for (index, item) in items.iter().enumerate() {
+        lines.extend(render_item(item, item_indent, list.tight));
+        if !list.tight && index + 1 < items.len() {
+            lines.push(String::new());
+        }
+    }
+
+    lines.push(indent_line(indent, format!("\\end{{{env}}}")));
+    lines.join("\n")
+}
+
+fn render_item<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    indent: usize,
+    parent_tight: bool,
+) -> Vec<String> {
+    let mut blocks = node.children().collect::<Vec<_>>();
+    if blocks.is_empty() {
+        return vec![indent_line(indent, "\\item")];
+    }
+
+    let first = blocks.remove(0);
+    let mut lines = Vec::new();
+
+    match &first.data.borrow().value {
+        comrak::nodes::NodeValue::Paragraph => {
+            let content = render_inlines(first);
+            lines.push(indent_line(indent, format!("\\item {content}")));
+        }
+        comrak::nodes::NodeValue::List(list) => {
+            lines.push(indent_line(indent, "\\item"));
+            let nested = render_list(first, indent, list);
+            lines.extend(nested.split('\n').map(|l| l.to_string()));
+        }
+        _ => {
+            if let Some(block) = render_block(first, indent + 4) {
+                lines.push(indent_line(indent, "\\item"));
+                lines.extend(block.split('\n').map(|l| l.to_string()));
+            } else {
+                lines.push(indent_line(indent, "\\item"));
+            }
+        }
+    }
+
+    for block in blocks {
+        match &block.data.borrow().value {
+            comrak::nodes::NodeValue::List(list) => {
+                let nested = render_list(block, indent, list);
+                lines.extend(nested.split('\n').map(|l| l.to_string()));
+            }
+            _ => {
+                if !parent_tight {
+                    lines.push(String::new());
+                }
+                if let Some(rendered) = render_block(block, indent + 4) {
+                    lines.extend(rendered.split('\n').map(|l| l.to_string()));
+                }
+            }
+        }
+    }
+
+    lines
+}
+
+fn indent_line(indent: usize, line: impl AsRef<str>) -> String {
+    if indent == 0 {
+        line.as_ref().to_string()
+    } else {
+        format!("{:indent$}{}", "", line.as_ref(), indent = indent)
+    }
+}
+
+fn indent_multiline(indent: usize, text: String) -> String {
+    if indent == 0 {
+        return text;
+    }
+
+    text.split('\n')
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                indent_line(indent, line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

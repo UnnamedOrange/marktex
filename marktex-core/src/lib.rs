@@ -37,6 +37,7 @@ pub fn compile_str(markdown: &str) -> Result<String> {
 
 fn comrak_options() -> comrak::Options<'static> {
     let mut options = comrak::Options::default();
+    options.extension.alerts = true;
     options.extension.autolink = true;
     options.extension.math_dollars = true;
     options.extension.table = true;
@@ -85,6 +86,9 @@ fn render_block<'a>(
         }
         comrak::nodes::NodeValue::BlockQuote => {
             Some(render_block_quote(node, indent, preprocessed))
+        }
+        comrak::nodes::NodeValue::Alert(alert) => {
+            Some(render_alert(node, indent, alert, preprocessed))
         }
         comrak::nodes::NodeValue::CodeBlock(code_block) => Some(render_code_block(
             code_block,
@@ -1307,6 +1311,37 @@ fn render_block_quote<'a>(
     lines.join("\n")
 }
 
+fn render_alert<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    indent: usize,
+    alert: &comrak::nodes::NodeAlert,
+    preprocessed: &PreprocessedMarkdown,
+) -> String {
+    let kind = match alert.alert_type {
+        comrak::nodes::AlertType::Note => "NOTE",
+        comrak::nodes::AlertType::Tip => "TIP",
+        comrak::nodes::AlertType::Important => "IMPORTANT",
+        comrak::nodes::AlertType::Warning => "WARNING",
+        comrak::nodes::AlertType::Caution => "CAUTION",
+    };
+
+    let content_indent = indent + 4;
+    let mut blocks = Vec::new();
+    for child in node.children() {
+        if let Some(block) = render_block(child, content_indent, preprocessed) {
+            blocks.push(block);
+        }
+    }
+
+    let mut lines = Vec::new();
+    lines.push(indent_line(indent, format!("\\begin{{alerts}}{{{kind}}}")));
+    if !blocks.is_empty() {
+        lines.extend(blocks.join("\n\n").split('\n').map(|l| l.to_string()));
+    }
+    lines.push(indent_line(indent, "\\end{alerts}"));
+    lines.join("\n")
+}
+
 fn render_list<'a>(
     node: &'a comrak::nodes::AstNode<'a>,
     indent: usize,
@@ -1360,7 +1395,12 @@ fn render_item<'a>(
             lines.extend(nested.split('\n').map(|l| l.to_string()));
         }
         _ => {
-            if let Some(block) = render_block(first, indent + 4, preprocessed) {
+            let block_indent = if aligns_with_item_indent(first) {
+                indent
+            } else {
+                indent + 4
+            };
+            if let Some(block) = render_block(first, block_indent, preprocessed) {
                 lines.push(indent_line(indent, "\\item"));
                 lines.extend(block.split('\n').map(|l| l.to_string()));
             } else {
@@ -1387,7 +1427,12 @@ fn render_item<'a>(
                 if !parent_tight {
                     lines.push(String::new());
                 }
-                if let Some(rendered) = render_block(block, indent + 4, preprocessed) {
+                let block_indent = if aligns_with_item_indent(block) {
+                    indent
+                } else {
+                    indent + 4
+                };
+                if let Some(rendered) = render_block(block, block_indent, preprocessed) {
                     lines.extend(rendered.split('\n').map(|l| l.to_string()));
                 }
             }
@@ -1395,6 +1440,15 @@ fn render_item<'a>(
     }
 
     lines
+}
+
+fn aligns_with_item_indent<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
+    matches!(
+        &node.data.borrow().value,
+        comrak::nodes::NodeValue::Alert(_)
+            | comrak::nodes::NodeValue::BlockQuote
+            | comrak::nodes::NodeValue::List(_)
+    )
 }
 
 fn render_item_paragraph(indent: usize, content: &str) -> Vec<String> {

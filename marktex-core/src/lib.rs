@@ -32,9 +32,7 @@ fn render_block<'a>(
     preprocessed: &PreprocessedMarkdown,
 ) -> Option<String> {
     match &node.data.borrow().value {
-        comrak::nodes::NodeValue::Paragraph => {
-            Some(indent_multiline(indent, render_inlines(node, preprocessed)))
-        }
+        comrak::nodes::NodeValue::Paragraph => Some(render_paragraph(node, indent, preprocessed)),
         comrak::nodes::NodeValue::Heading(heading) => {
             let content = render_inlines(node, preprocessed);
             let command = match heading.level {
@@ -53,7 +51,44 @@ fn render_block<'a>(
             Some(render_block_quote(node, indent, preprocessed))
         }
         comrak::nodes::NodeValue::CodeBlock(code_block) => Some(render_code_block(code_block)),
+        comrak::nodes::NodeValue::HtmlBlock(html) => render_html_block(html, indent),
         comrak::nodes::NodeValue::List(list) => Some(render_list(node, indent, list, preprocessed)),
+        _ => None,
+    }
+}
+
+fn render_paragraph<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    indent: usize,
+    preprocessed: &PreprocessedMarkdown,
+) -> String {
+    if let Some(figure) = render_paragraph_as_figure(node, indent) {
+        return figure;
+    }
+
+    indent_multiline(indent, render_inlines(node, preprocessed))
+}
+
+fn render_paragraph_as_figure<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    indent: usize,
+) -> Option<String> {
+    let mut children = node.children();
+    let only = children.next()?;
+    if children.next().is_some() {
+        return None;
+    }
+
+    match &only.data.borrow().value {
+        comrak::nodes::NodeValue::Image(image) => {
+            let include = render_includegraphics(&image.url, None);
+            Some(render_figure(indent, &include))
+        }
+        comrak::nodes::NodeValue::HtmlInline(html) => {
+            let image = parse_html_img_tag(html)?;
+            let include = render_includegraphics(&image.src, image.option);
+            Some(render_figure(indent, &include))
+        }
         _ => None,
     }
 }
@@ -74,6 +109,15 @@ fn render_inlines<'a>(
             }
             comrak::nodes::NodeValue::Code(code) => {
                 out.push_str(&render_inline_code(&code.literal));
+            }
+            comrak::nodes::NodeValue::Image(image) => {
+                out.push_str(&render_includegraphics(&image.url, None));
+            }
+            comrak::nodes::NodeValue::HtmlInline(html) => {
+                if let Some(image) = parse_html_img_tag(html) {
+                    let include = render_includegraphics(&image.src, image.option);
+                    out.push_str(&render_figure(0, &include));
+                }
             }
             comrak::nodes::NodeValue::Emph => {
                 if let Some(inner) = emph_as_strong_emph(child, preprocessed) {
@@ -287,6 +331,160 @@ fn render_code_block(code_block: &comrak::nodes::NodeCodeBlock) -> String {
     out.push('\n');
     out.push_str("\\end{lstlisting}");
     out
+}
+
+fn render_html_block(html: &comrak::nodes::NodeHtmlBlock, indent: usize) -> Option<String> {
+    let images = parse_html_img_tags(&html.literal);
+    if images.is_empty() {
+        return None;
+    }
+
+    let figures = images
+        .into_iter()
+        .map(|image| {
+            let include = render_includegraphics(&image.src, image.option);
+            render_figure(indent, &include)
+        })
+        .collect::<Vec<_>>();
+    Some(figures.join("\n"))
+}
+
+fn escape_latex_path(path: &str) -> String {
+    let mut out = String::new();
+    for ch in path.chars() {
+        match ch {
+            '&' => out.push_str("\\&"),
+            '%' => out.push_str("\\%"),
+            '$' => out.push_str("\\$"),
+            '#' => out.push_str("\\#"),
+            '_' => out.push_str("\\_"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '~' => out.push_str("\\textasciitilde{}"),
+            '^' => out.push_str("\\textasciicircum{}"),
+            '\\' => out.push_str("\\textbackslash{}"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+enum IncludeGraphicsOption {
+    Scale(f64),
+    WidthTextWidth(f64),
+}
+
+fn render_includegraphics(url: &str, option: Option<IncludeGraphicsOption>) -> String {
+    let url = escape_latex_path(url);
+    match option {
+        Some(IncludeGraphicsOption::Scale(scale)) => {
+            format!("\\includegraphics[scale={scale:.2}]{{{url}}}")
+        }
+        Some(IncludeGraphicsOption::WidthTextWidth(width)) => {
+            let width = format_f64_trimmed_2(width);
+            format!("\\includegraphics[width={width}\\textwidth]{{{url}}}")
+        }
+        None => format!("\\includegraphics{{{url}}}"),
+    }
+}
+
+fn format_f64_trimmed_2(value: f64) -> String {
+    let mut out = format!("{value:.2}");
+    while out.contains('.') && out.ends_with('0') {
+        out.pop();
+    }
+    if out.ends_with('.') {
+        out.pop();
+    }
+    out
+}
+
+fn render_figure(indent: usize, includegraphics: &str) -> String {
+    let mut lines = Vec::new();
+    lines.push(indent_line(indent, "\\begin{figure}"));
+    lines.push(indent_line(indent + 4, "\\centering"));
+    lines.push(indent_line(indent + 4, includegraphics));
+    lines.push(indent_line(indent, "\\end{figure}"));
+    lines.join("\n")
+}
+
+struct HtmlImage {
+    src: String,
+    option: Option<IncludeGraphicsOption>,
+}
+
+fn parse_html_img_tag(html: &str) -> Option<HtmlImage> {
+    let html = html.trim();
+    if !html.starts_with("<img") {
+        return None;
+    }
+
+    let src = extract_html_attr_value(html, "src")?;
+    let option =
+        extract_html_attr_value(html, "style").and_then(|style| parse_html_img_option(&style));
+
+    Some(HtmlImage { src, option })
+}
+
+fn parse_html_img_tags(html: &str) -> Vec<HtmlImage> {
+    let html = html.trim();
+    if !html.starts_with("<img") {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while let Some(start) = html[offset..].find("<img") {
+        let start = offset + start;
+        let Some(end) = html[start..].find('>') else {
+            break;
+        };
+        let end = start + end + 1;
+        if let Some(image) = parse_html_img_tag(&html[start..end]) {
+            out.push(image);
+        }
+        offset = end;
+    }
+
+    out
+}
+
+fn extract_html_attr_value(html: &str, attr: &str) -> Option<String> {
+    let pattern = format!("{attr}=\"");
+    let start = html.find(&pattern)? + pattern.len();
+    let rest = &html[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn parse_html_img_option(style: &str) -> Option<IncludeGraphicsOption> {
+    parse_zoom_scale(style)
+        .map(IncludeGraphicsOption::Scale)
+        .or_else(|| parse_width_scale(style).map(IncludeGraphicsOption::WidthTextWidth))
+}
+
+fn parse_zoom_scale(style: &str) -> Option<f64> {
+    let start = style.find("zoom")?;
+    let after = &style[start + "zoom".len()..];
+    let after = after.strip_prefix(':')?.trim_start();
+    let percent = after
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect::<String>();
+    let percent: f64 = percent.parse().ok()?;
+    Some(percent / 100.0)
+}
+
+fn parse_width_scale(style: &str) -> Option<f64> {
+    let start = style.find("width")?;
+    let after = &style[start + "width".len()..];
+    let after = after.strip_prefix(':')?.trim_start();
+    let percent = after
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+        .collect::<String>();
+    let percent: f64 = percent.parse().ok()?;
+    Some(percent / 100.0)
 }
 
 fn render_inline_code(literal: &str) -> String {

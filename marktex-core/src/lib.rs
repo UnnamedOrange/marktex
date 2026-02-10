@@ -49,6 +49,9 @@ fn render_block<'a>(
                 format!("\\{command}{{{content}}}"),
             ))
         }
+        comrak::nodes::NodeValue::BlockQuote => {
+            Some(render_block_quote(node, indent, preprocessed))
+        }
         comrak::nodes::NodeValue::List(list) => Some(render_list(node, indent, list, preprocessed)),
         _ => None,
     }
@@ -264,6 +267,28 @@ fn render_display_math(literal: &str) -> String {
     }
     out.push_str("$$");
     out
+}
+
+fn render_block_quote<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    indent: usize,
+    preprocessed: &PreprocessedMarkdown,
+) -> String {
+    let content_indent = indent + 4;
+    let mut blocks = Vec::new();
+    for child in node.children() {
+        if let Some(block) = render_block(child, content_indent, preprocessed) {
+            blocks.push(block);
+        }
+    }
+
+    let mut lines = Vec::new();
+    lines.push(indent_line(indent, "\\begin{quotation}"));
+    if !blocks.is_empty() {
+        lines.extend(blocks.join("\n\n").split('\n').map(|l| l.to_string()));
+    }
+    lines.push(indent_line(indent, "\\end{quotation}"));
+    lines.join("\n")
 }
 
 fn render_list<'a>(

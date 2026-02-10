@@ -3,7 +3,44 @@
 
 mod cli;
 
-fn main() {}
+fn main() {
+    if std::env::args_os().len() == 1 {
+        let mut cmd = <cli::CliArgs as clap::CommandFactory>::command();
+        let _ = cmd.print_help();
+        println!();
+        return;
+    }
+
+    let args = <cli::CliArgs as clap::Parser>::parse();
+
+    if args.inputs.is_empty() {
+        eprintln!("没有输入文件");
+        std::process::exit(1);
+    }
+
+    let mut out = String::new();
+    for input in &args.inputs {
+        match std::fs::read_to_string(input) {
+            Ok(content) => out.push_str(&content),
+            Err(err) => {
+                eprintln!("无法读取输入文件 {}: {err}", input.display());
+                std::process::exit(1);
+            }
+        }
+    }
+
+    match &args.output {
+        Some(output) => {
+            if let Err(err) = std::fs::write(output, out) {
+                eprintln!("无法写入输出文件 {}: {err}", output.display());
+                std::process::exit(1);
+            }
+        }
+        None => {
+            print!("{out}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

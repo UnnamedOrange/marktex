@@ -29,6 +29,14 @@ fn main() {
         }
     }
 
+    let out = match marktex_core::compile_str(&out) {
+        Ok(output) => output,
+        Err(err) => {
+            eprintln!("无法编译输入文件: {err}");
+            std::process::exit(1);
+        }
+    };
+
     match &args.output {
         Some(output) => {
             if let Err(err) = std::fs::write(output, out) {

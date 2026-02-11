@@ -7,11 +7,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn compile_str(markdown: &str) -> Result<String> {
     let preprocessed = preprocess_markdown(markdown);
     let arena = comrak::Arena::new();
-    let mut options = comrak::Options::default();
-    options.extension.autolink = true;
-    options.extension.math_dollars = true;
-    options.extension.table = true;
-    options.parse.ignore_setext = true;
+    let options = comrak_options();
     let root = comrak::parse_document(&arena, &preprocessed.markdown, &options);
 
     let mut blocks = Vec::new();
@@ -37,6 +33,15 @@ pub fn compile_str(markdown: &str) -> Result<String> {
     }
     out.push('\n');
     Ok(out)
+}
+
+fn comrak_options() -> comrak::Options<'static> {
+    let mut options = comrak::Options::default();
+    options.extension.autolink = true;
+    options.extension.math_dollars = true;
+    options.extension.table = true;
+    options.parse.ignore_setext = true;
+    options
 }
 
 struct RenderedBlock {
@@ -81,8 +86,11 @@ fn render_block<'a>(
         comrak::nodes::NodeValue::BlockQuote => {
             Some(render_block_quote(node, indent, preprocessed))
         }
-        comrak::nodes::NodeValue::CodeBlock(code_block) => Some(render_code_block(code_block)),
-        comrak::nodes::NodeValue::HtmlBlock(html) => render_html_block(html, indent),
+        comrak::nodes::NodeValue::CodeBlock(code_block) => Some(render_code_block(
+            code_block,
+            preprocessed.trailing_space_sentinel,
+        )),
+        comrak::nodes::NodeValue::HtmlBlock(html) => render_html_block(html, indent, preprocessed),
         comrak::nodes::NodeValue::List(list) => Some(render_list(node, indent, list, preprocessed)),
         comrak::nodes::NodeValue::Table(table) => Some(render_table(node, indent, table, preprocessed)),
         _ => None,
@@ -94,7 +102,7 @@ fn render_paragraph<'a>(
     indent: usize,
     preprocessed: &PreprocessedMarkdown,
 ) -> String {
-    if let Some(figure) = render_paragraph_as_figure(node, indent) {
+    if let Some(figure) = render_paragraph_as_figure(node, indent, preprocessed) {
         return figure;
     }
 
@@ -104,6 +112,7 @@ fn render_paragraph<'a>(
 fn render_paragraph_as_figure<'a>(
     node: &'a comrak::nodes::AstNode<'a>,
     indent: usize,
+    preprocessed: &PreprocessedMarkdown,
 ) -> Option<String> {
     let mut children = node.children();
     let only = children.next()?;
@@ -113,12 +122,17 @@ fn render_paragraph_as_figure<'a>(
 
     match &only.data.borrow().value {
         comrak::nodes::NodeValue::Image(image) => {
-            let include = render_includegraphics(&image.url, None);
+            let include =
+                render_includegraphics(&image.url, None, preprocessed.trailing_space_sentinel);
             Some(render_figure(indent, &include))
         }
         comrak::nodes::NodeValue::HtmlInline(html) => {
             let image = parse_html_img_tag(html)?;
-            let include = render_includegraphics(&image.src, image.option);
+            let include = render_includegraphics(
+                &image.src,
+                image.option,
+                preprocessed.trailing_space_sentinel,
+            );
             Some(render_figure(indent, &include))
         }
         _ => None,
@@ -129,71 +143,386 @@ fn render_inlines<'a>(
     node: &'a comrak::nodes::AstNode<'a>,
     preprocessed: &PreprocessedMarkdown,
 ) -> String {
+    render_inlines_with_references(node, preprocessed, true)
+}
+
+fn render_inlines_with_references<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+    allow_footnotes: bool,
+) -> String {
     let mut out = String::new();
-    for child in node.children() {
+    let mut pending_cites = Vec::new();
+    let children = node.children().collect::<Vec<_>>();
+    let mut index = 0;
+    while let Some(child) = children.get(index).copied() {
         match &child.data.borrow().value {
             comrak::nodes::NodeValue::Text(text) => {
                 if let Some(literal) = preprocessed.math_block_literal(text) {
-                    out.push_str(&render_display_math(literal));
+                    flush_pending_cites(&mut out, &mut pending_cites);
+                    out.push_str(&render_display_math(
+                        literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
                 } else {
-                    push_text(&mut out, text, preprocessed.trailing_space_sentinel);
+                    render_text_with_references(
+                        &mut out,
+                        text,
+                        preprocessed,
+                        allow_footnotes,
+                        &mut pending_cites,
+                    );
                 }
             }
             comrak::nodes::NodeValue::Code(code) => {
-                out.push_str(&render_inline_code(&code.literal));
+                flush_pending_cites(&mut out, &mut pending_cites);
+                out.push_str(&render_inline_code(
+                    &code.literal,
+                    preprocessed.trailing_space_sentinel,
+                ));
             }
             comrak::nodes::NodeValue::Image(image) => {
-                out.push_str(&render_includegraphics(&image.url, None));
+                flush_pending_cites(&mut out, &mut pending_cites);
+                out.push_str(&render_includegraphics(
+                    &image.url,
+                    None,
+                    preprocessed.trailing_space_sentinel,
+                ));
             }
             comrak::nodes::NodeValue::HtmlInline(html) => {
+                flush_pending_cites(&mut out, &mut pending_cites);
                 if let Some(image) = parse_html_img_tag(html) {
-                    let include = render_includegraphics(&image.src, image.option);
-                    out.push_str(&render_figure(0, &include));
+                    let include = render_includegraphics(
+                        &image.src,
+                        image.option,
+                        preprocessed.trailing_space_sentinel,
+                    );
+                    if inline_node_is_standalone_line(&children, index) {
+                        out.push_str(&render_figure(0, &include));
+                    } else {
+                        out.push_str(&include);
+                    }
                 } else if let Some(content) = parse_html_center_tag(html) {
                     out.push_str(&render_center(0, &content));
                 }
             }
             comrak::nodes::NodeValue::Link(link) => {
-                let url = link.url.as_str();
+                flush_pending_cites(&mut out, &mut pending_cites);
+                let url = restore_trailing_space_sentinel(
+                    link.url.as_str(),
+                    preprocessed.trailing_space_sentinel,
+                );
                 if url.starts_with('#') {
-                    let text = render_inlines(child, preprocessed);
+                    let text = render_inlines_with_references(child, preprocessed, allow_footnotes);
                     out.push_str(&text);
-                } else if link_text_is_exact_url(child, url) {
-                    let (url, suffix) = split_trailing_url_punctuation(url);
+                } else if link_text_is_exact_url(child, &url, preprocessed.trailing_space_sentinel)
+                {
+                    let (url, suffix) = split_trailing_url_punctuation(&url);
                     out.push_str(&format!("\\url{{{url}}}{suffix}"));
                 } else {
-                    let text = render_inlines(child, preprocessed);
-                    let url = escape_latex_href_url(url);
+                    let text = render_inlines_with_references(child, preprocessed, allow_footnotes);
+                    let url = escape_latex_href_url(&url);
                     out.push_str(&format!("\\href{{{url}}}{{{text}}}"));
                 }
             }
             comrak::nodes::NodeValue::Emph => {
+                flush_pending_cites(&mut out, &mut pending_cites);
                 if let Some(inner) = emph_as_strong_emph(child, preprocessed) {
                     out.push_str(&format!("\\textbf{{\\emph{{{inner}}}}}"));
                 } else {
-                    let inner = render_inlines(child, preprocessed);
+                    let inner =
+                        render_inlines_with_references(child, preprocessed, allow_footnotes);
                     out.push_str(&format!("\\emph{{{inner}}}"));
                 }
             }
             comrak::nodes::NodeValue::Strong => {
-                let inner = render_inlines(child, preprocessed);
+                flush_pending_cites(&mut out, &mut pending_cites);
+                let inner = render_inlines_with_references(child, preprocessed, allow_footnotes);
                 out.push_str(&format!("\\textbf{{{inner}}}"));
             }
             comrak::nodes::NodeValue::Math(math) => {
+                flush_pending_cites(&mut out, &mut pending_cites);
                 if math.display_math {
-                    out.push_str(&render_display_math(&math.literal));
+                    out.push_str(&render_display_math(
+                        &math.literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
                 } else {
+                    // comrak's `$...$` parsing does not understand LaTeX command-group semantics well.
+                    // When users nest `$...$` inside a command argument (e.g. `\\text{...}`),
+                    // comrak may fragment the intended
+                    // output into a `Math(\"...\\\\cmd{\")` node followed by `Text(...)`/`Math(...)`
+                    // nodes that still contain `$` delimiters. We stitch these fragments back into
+                    // valid LaTeX while being careful not to treat literal dollars (e.g. `\\$`)
+                    // as delimiters.
+                    if opens_latex_command_group(&math.literal) {
+                        if let Some(next) = children.get(index + 1) {
+                            if let comrak::nodes::NodeValue::Text(text) = &next.data.borrow().value
+                            {
+                                if let Some((inner, outer, suffix)) =
+                                    split_at_last_two_unescaped_dollars(text)
+                                {
+                                    out.push('$');
+                                    out.push_str(&restore_trailing_space_sentinel(
+                                        &math.literal,
+                                        preprocessed.trailing_space_sentinel,
+                                    ));
+                                    out.push('$');
+                                    push_raw_text(
+                                        &mut out,
+                                        inner,
+                                        preprocessed.trailing_space_sentinel,
+                                    );
+                                    out.push('$');
+                                    push_raw_text(
+                                        &mut out,
+                                        outer,
+                                        preprocessed.trailing_space_sentinel,
+                                    );
+                                    out.push('$');
+                                    if !suffix.is_empty() {
+                                        render_text_with_references(
+                                            &mut out,
+                                            suffix,
+                                            preprocessed,
+                                            allow_footnotes,
+                                            &mut pending_cites,
+                                        );
+                                    }
+                                    index += 2;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if let (Some(next), Some(next_next)) =
+                            (children.get(index + 1), children.get(index + 2))
+                        {
+                            if let (
+                                comrak::nodes::NodeValue::Math(inner),
+                                comrak::nodes::NodeValue::Text(text),
+                            ) = (&next.data.borrow().value, &next_next.data.borrow().value)
+                            {
+                                if !inner.display_math {
+                                    if let Some((tail, suffix)) =
+                                        split_at_last_unescaped_dollar(text)
+                                    {
+                                        out.push('$');
+                                        out.push_str(&restore_trailing_space_sentinel(
+                                            &math.literal,
+                                            preprocessed.trailing_space_sentinel,
+                                        ));
+                                        out.push('$');
+                                        out.push_str(&restore_trailing_space_sentinel(
+                                            &inner.literal,
+                                            preprocessed.trailing_space_sentinel,
+                                        ));
+                                        out.push('$');
+                                        push_raw_text(
+                                            &mut out,
+                                            tail,
+                                            preprocessed.trailing_space_sentinel,
+                                        );
+                                        out.push('$');
+                                        if !suffix.is_empty() {
+                                            render_text_with_references(
+                                                &mut out,
+                                                suffix,
+                                                preprocessed,
+                                                allow_footnotes,
+                                                &mut pending_cites,
+                                            );
+                                        }
+                                        index += 3;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     out.push('$');
-                    out.push_str(&math.literal);
+                    out.push_str(&restore_trailing_space_sentinel(
+                        &math.literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
                     out.push('$');
                 }
             }
-            comrak::nodes::NodeValue::SoftBreak => out.push('\n'),
-            comrak::nodes::NodeValue::LineBreak => out.push('\n'),
+            comrak::nodes::NodeValue::SoftBreak => {
+                flush_pending_cites(&mut out, &mut pending_cites);
+                out.push('\n');
+            }
+            comrak::nodes::NodeValue::LineBreak => {
+                flush_pending_cites(&mut out, &mut pending_cites);
+                out.push('\n');
+            }
             _ => {}
         }
+        index += 1;
     }
+    flush_pending_cites(&mut out, &mut pending_cites);
     out
+}
+
+fn inline_node_is_standalone_line<'a>(
+    siblings: &[&'a comrak::nodes::AstNode<'a>],
+    index: usize,
+) -> bool {
+    let at_line_start = index == 0
+        || matches!(
+            &siblings[index - 1].data.borrow().value,
+            comrak::nodes::NodeValue::SoftBreak | comrak::nodes::NodeValue::LineBreak
+        );
+
+    let at_line_end = index + 1 == siblings.len()
+        || matches!(
+            &siblings[index + 1].data.borrow().value,
+            comrak::nodes::NodeValue::SoftBreak | comrak::nodes::NodeValue::LineBreak
+        );
+
+    at_line_start && at_line_end
+}
+
+fn opens_latex_command_group(literal: &str) -> bool {
+    let Some(prefix) = literal.strip_suffix('{') else {
+        return false;
+    };
+    let Some(start) = prefix.rfind('\\') else {
+        return false;
+    };
+
+    let command = &prefix[start + '\\'.len_utf8()..];
+    !command.is_empty()
+        && command
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || ch == '*')
+}
+
+fn split_at_last_two_unescaped_dollars(text: &str) -> Option<(&str, &str, &str)> {
+    let mut backslashes = 0usize;
+    let mut penultimate = None;
+    let mut last = None;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '\\' => backslashes += 1,
+            '$' => {
+                if backslashes % 2 == 0 {
+                    penultimate = last;
+                    last = Some(index);
+                }
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
+    }
+
+    let penultimate = penultimate?;
+    let last = last?;
+    let before = &text[..penultimate];
+    let between = &text[penultimate + '$'.len_utf8()..last];
+    let after = &text[last + '$'.len_utf8()..];
+    Some((before, between, after))
+}
+
+fn split_at_last_unescaped_dollar(text: &str) -> Option<(&str, &str)> {
+    let mut backslashes = 0usize;
+    let mut last = None;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '\\' => backslashes += 1,
+            '$' => {
+                if backslashes % 2 == 0 {
+                    last = Some(index);
+                }
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
+    }
+
+    let pos = last?;
+    Some((&text[..pos], &text[pos + '$'.len_utf8()..]))
+}
+
+fn render_text_with_references(
+    out: &mut String,
+    text: &str,
+    preprocessed: &PreprocessedMarkdown,
+    allow_footnotes: bool,
+    pending_cites: &mut Vec<String>,
+) {
+    let mut rest = text;
+    while let Some(start) = rest.find("[^") {
+        let (before, after_start) = rest.split_at(start);
+        if !before.is_empty() {
+            flush_pending_cites(out, pending_cites);
+            push_text(out, before, preprocessed.trailing_space_sentinel);
+        }
+
+        let Some(end) = after_start.find(']') else {
+            break;
+        };
+        let name = &after_start[2..end];
+        if name.is_empty() {
+            break;
+        }
+
+        let after = &after_start[end + 1..];
+        let is_footnote = allow_footnotes && preprocessed.footnote_definition(name).is_some();
+        if is_footnote {
+            flush_pending_cites(out, pending_cites);
+            out.push_str(&render_footnote(name, preprocessed));
+        } else {
+            pending_cites.push(name.to_string());
+        }
+
+        rest = after;
+    }
+
+    if !rest.is_empty() {
+        flush_pending_cites(out, pending_cites);
+        push_text(out, rest, preprocessed.trailing_space_sentinel);
+    }
+}
+
+fn flush_pending_cites(out: &mut String, pending: &mut Vec<String>) {
+    if pending.is_empty() {
+        return;
+    }
+
+    out.push_str("\\cite{");
+    out.push_str(&pending.join(","));
+    out.push('}');
+    pending.clear();
+}
+
+fn render_footnote(name: &str, preprocessed: &PreprocessedMarkdown) -> String {
+    let Some(markdown) = preprocessed.footnote_definition(name) else {
+        return format!("\\cite{{{name}}}");
+    };
+
+    let content = render_inline_fragment(markdown);
+    format!("\\footnote{{{content}}}")
+}
+
+fn render_inline_fragment(markdown: &str) -> String {
+    let preprocessed = preprocess_markdown(markdown);
+    let arena = comrak::Arena::new();
+    let options = comrak_options();
+    let root = comrak::parse_document(&arena, &preprocessed.markdown, &options);
+
+    let mut parts = Vec::new();
+    for node in root.children() {
+        if matches!(
+            node.data.borrow().value,
+            comrak::nodes::NodeValue::Paragraph
+        ) {
+            parts.push(render_inlines_with_references(node, &preprocessed, false));
+        } else if let Some(block) = render_block(node, 0, &preprocessed) {
+            parts.push(block);
+        }
+    }
+    parts.join("\n\n")
 }
 
 fn render_inlines_escaped<'a>(
@@ -205,7 +534,10 @@ fn render_inlines_escaped<'a>(
         match &child.data.borrow().value {
             comrak::nodes::NodeValue::Text(text) => {
                 if let Some(literal) = preprocessed.math_block_literal(text) {
-                    out.push_str(&render_display_math(literal));
+                    out.push_str(&render_display_math(
+                        literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
                 } else {
                     out.push_str(&escape_latex_text_restore_trailing_space_sentinel(
                         text,
@@ -214,7 +546,10 @@ fn render_inlines_escaped<'a>(
                 }
             }
             comrak::nodes::NodeValue::Code(code) => {
-                out.push_str(&render_inline_code(&code.literal));
+                out.push_str(&render_inline_code(
+                    &code.literal,
+                    preprocessed.trailing_space_sentinel,
+                ));
             }
             comrak::nodes::NodeValue::Emph => {
                 let inner = render_inlines_escaped(child, preprocessed);
@@ -226,10 +561,16 @@ fn render_inlines_escaped<'a>(
             }
             comrak::nodes::NodeValue::Math(math) => {
                 if math.display_math {
-                    out.push_str(&render_display_math(&math.literal));
+                    out.push_str(&render_display_math(
+                        &math.literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
                 } else {
                     out.push('$');
-                    out.push_str(&math.literal);
+                    out.push_str(&restore_trailing_space_sentinel(
+                        &math.literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
                     out.push('$');
                 }
             }
@@ -250,6 +591,18 @@ fn escape_latex_text_restore_trailing_space_sentinel(
     trailing_space_sentinel: char,
 ) -> String {
     escape_latex_text_inner(text, Some(trailing_space_sentinel))
+}
+
+fn restore_trailing_space_sentinel(text: &str, trailing_space_sentinel: char) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch == trailing_space_sentinel {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn escape_latex_text_inner(text: &str, trailing_space_sentinel: Option<char>) -> String {
@@ -282,6 +635,7 @@ const MATH_BLOCK_PLACEHOLDER_SUFFIX: &str = "@@";
 struct PreprocessedMarkdown {
     markdown: String,
     math_blocks: Vec<String>,
+    footnotes: std::collections::HashMap<String, String>,
     math_block_placeholder_prefix: String,
     trailing_space_sentinel: char,
 }
@@ -293,6 +647,10 @@ impl PreprocessedMarkdown {
             .strip_suffix(MATH_BLOCK_PLACEHOLDER_SUFFIX)?;
         let index: usize = number.parse().ok()?;
         self.math_blocks.get(index).map(String::as_str)
+    }
+
+    fn footnote_definition(&self, name: &str) -> Option<&str> {
+        self.footnotes.get(name).map(String::as_str)
     }
 }
 
@@ -331,6 +689,7 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
 
     let mut out = String::with_capacity(markdown.len());
     let mut math_blocks = Vec::new();
+    let mut footnotes = std::collections::HashMap::new();
 
     let mut lines = markdown.split_inclusive('\n').peekable();
     while let Some(line) = lines.next() {
@@ -338,6 +697,14 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
             Some(content) => (content, "\n"),
             None => (line, ""),
         };
+
+        if let Some((name, definition)) = parse_footnote_definition_line(content) {
+            footnotes.insert(name, definition);
+            if !newline.is_empty() {
+                out.push_str(newline);
+            }
+            continue;
+        }
 
         if content == "$$" {
             let mut literal = String::new();
@@ -371,6 +738,7 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
     PreprocessedMarkdown {
         markdown: out,
         math_blocks,
+        footnotes,
         math_block_placeholder_prefix,
         trailing_space_sentinel,
     }
@@ -404,6 +772,15 @@ fn encode_space_before_trailing_closing_strong(
 
 fn is_trailing_closing_strong_suffix_char(ch: char) -> bool {
     !ch.is_whitespace() && !ch.is_alphanumeric()
+}
+
+fn parse_footnote_definition_line(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("[^")?;
+    let (name, definition) = rest.split_once("]: ")?;
+    if name.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), definition.to_string()))
 }
 
 fn strip_disabled_header_anchor_links(text: &str) -> String {
@@ -496,11 +873,12 @@ fn find_link_destination_end(text: &str, start: usize) -> Option<usize> {
     }
     None
 }
-
 fn push_raw_text(out: &mut String, text: &str, trailing_space_sentinel: char) {
     for ch in text.chars() {
         if ch == trailing_space_sentinel {
             out.push(' ');
+        } else if ch == '$' {
+            out.push_str("\\$");
         } else {
             out.push(ch);
         }
@@ -509,7 +887,10 @@ fn push_raw_text(out: &mut String, text: &str, trailing_space_sentinel: char) {
 
 fn push_text(out: &mut String, text: &str, trailing_space_sentinel: char) {
     let text = strip_disabled_header_anchor_links(text);
-    push_raw_text(out, &text, trailing_space_sentinel);
+    out.push_str(&escape_latex_text_restore_trailing_space_sentinel(
+        &text,
+        trailing_space_sentinel,
+    ));
 }
 
 fn emph_as_strong_emph<'a>(
@@ -526,8 +907,9 @@ fn emph_as_strong_emph<'a>(
         .then(|| render_inlines(child, preprocessed))
 }
 
-fn render_display_math(literal: &str) -> String {
-    let literal = literal.strip_prefix('\n').unwrap_or(literal);
+fn render_display_math(literal: &str, trailing_space_sentinel: char) -> String {
+    let literal = restore_trailing_space_sentinel(literal, trailing_space_sentinel);
+    let literal = literal.strip_prefix('\n').unwrap_or(&literal);
     if is_top_level_display_math_environment(literal) {
         return literal.strip_suffix('\n').unwrap_or(literal).to_string();
     }
@@ -571,7 +953,10 @@ fn is_top_level_display_math_environment(literal: &str) -> bool {
     literal.trim_end().ends_with(&format!("\\end{{{env}}}"))
 }
 
-fn render_code_block(code_block: &comrak::nodes::NodeCodeBlock) -> String {
+fn render_code_block(
+    code_block: &comrak::nodes::NodeCodeBlock,
+    trailing_space_sentinel: char,
+) -> String {
     let info = code_block.info.trim();
     let language = info.split_whitespace().next().unwrap_or("");
 
@@ -584,7 +969,11 @@ fn render_code_block(code_block: &comrak::nodes::NodeCodeBlock) -> String {
         out.push_str("]\n");
     }
 
-    out.push_str(code_block.literal.trim_end_matches('\n'));
+    let literal = restore_trailing_space_sentinel(
+        code_block.literal.trim_end_matches('\n'),
+        trailing_space_sentinel,
+    );
+    out.push_str(&literal);
     out.push('\n');
     out.push_str("\\end{lstlisting}");
     out
@@ -611,10 +1000,7 @@ fn render_table<'a>(
     }
 
     let mut lines = Vec::new();
-    lines.push(indent_line(
-        indent,
-        format!("\\begin{{tabular}}{{{spec}}}"),
-    ));
+    lines.push(indent_line(indent, format!("\\begin{{tabular}}{{{spec}}}")));
     lines.push(indent_line(indent + 4, "\\hline"));
 
     for row in node.children() {
@@ -683,7 +1069,11 @@ fn split_trailing_url_punctuation(url: &str) -> (String, String) {
     (base.to_string(), suffix.to_string())
 }
 
-fn link_text_is_exact_url<'a>(node: &'a comrak::nodes::AstNode<'a>, url: &str) -> bool {
+fn link_text_is_exact_url<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    url: &str,
+    trailing_space_sentinel: char,
+) -> bool {
     let mut children = node.children();
     let Some(only) = children.next() else {
         return false;
@@ -694,7 +1084,8 @@ fn link_text_is_exact_url<'a>(node: &'a comrak::nodes::AstNode<'a>, url: &str) -
 
     matches!(
         &only.data.borrow().value,
-        comrak::nodes::NodeValue::Text(text) if text == url
+        comrak::nodes::NodeValue::Text(text)
+            if restore_trailing_space_sentinel(text, trailing_space_sentinel) == url
     )
 }
 
@@ -714,13 +1105,21 @@ fn escape_latex_href_url(url: &str) -> String {
     out
 }
 
-fn render_html_block(html: &comrak::nodes::NodeHtmlBlock, indent: usize) -> Option<String> {
+fn render_html_block(
+    html: &comrak::nodes::NodeHtmlBlock,
+    indent: usize,
+    preprocessed: &PreprocessedMarkdown,
+) -> Option<String> {
     let images = parse_html_img_tags(&html.literal);
     if !images.is_empty() {
         let figures = images
             .into_iter()
             .map(|image| {
-                let include = render_includegraphics(&image.src, image.option);
+                let include = render_includegraphics(
+                    &image.src,
+                    image.option,
+                    preprocessed.trailing_space_sentinel,
+                );
                 render_figure(indent, &include)
             })
             .collect::<Vec<_>>();
@@ -739,8 +1138,13 @@ enum IncludeGraphicsOption {
     WidthTextWidth(f64),
 }
 
-fn render_includegraphics(url: &str, option: Option<IncludeGraphicsOption>) -> String {
-    let url = escape_latex_text(url);
+fn render_includegraphics(
+    url: &str,
+    option: Option<IncludeGraphicsOption>,
+    trailing_space_sentinel: char,
+) -> String {
+    let url = restore_trailing_space_sentinel(url, trailing_space_sentinel);
+    let url = escape_latex_text(&url);
     match option {
         Some(IncludeGraphicsOption::Scale(scale)) => {
             format!("\\includegraphics[scale={scale:.2}]{{{url}}}")
@@ -866,7 +1270,8 @@ fn parse_width_scale(style: &str) -> Option<f64> {
     Some(percent / 100.0)
 }
 
-fn render_inline_code(literal: &str) -> String {
+fn render_inline_code(literal: &str, trailing_space_sentinel: char) -> String {
+    let literal = restore_trailing_space_sentinel(literal, trailing_space_sentinel);
     let delimiter = if !literal.contains('|') {
         '|'
     } else if !literal.contains('`') {

@@ -9,6 +9,7 @@ pub fn compile_str(markdown: &str) -> Result<String> {
     let arena = comrak::Arena::new();
     let mut options = comrak::Options::default();
     options.extension.math_dollars = true;
+    options.extension.table = true;
     options.parse.ignore_setext = true;
     let root = comrak::parse_document(&arena, &preprocessed.markdown, &options);
 
@@ -82,6 +83,7 @@ fn render_block<'a>(
         comrak::nodes::NodeValue::CodeBlock(code_block) => Some(render_code_block(code_block)),
         comrak::nodes::NodeValue::HtmlBlock(html) => render_html_block(html, indent),
         comrak::nodes::NodeValue::List(list) => Some(render_list(node, indent, list, preprocessed)),
+        comrak::nodes::NodeValue::Table(table) => Some(render_table(node, indent, table, preprocessed)),
         _ => None,
     }
 }
@@ -174,6 +176,86 @@ fn render_inlines<'a>(
             comrak::nodes::NodeValue::SoftBreak => out.push('\n'),
             comrak::nodes::NodeValue::LineBreak => out.push('\n'),
             _ => {}
+        }
+    }
+    out
+}
+
+fn render_inlines_escaped<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+) -> String {
+    let mut out = String::new();
+    for child in node.children() {
+        match &child.data.borrow().value {
+            comrak::nodes::NodeValue::Text(text) => {
+                if let Some(literal) = preprocessed.math_block_literal(text) {
+                    out.push_str(&render_display_math(literal));
+                } else {
+                    out.push_str(&escape_latex_text_restore_trailing_space_sentinel(
+                        text,
+                        preprocessed.trailing_space_sentinel,
+                    ));
+                }
+            }
+            comrak::nodes::NodeValue::Code(code) => {
+                out.push_str(&render_inline_code(&code.literal));
+            }
+            comrak::nodes::NodeValue::Emph => {
+                let inner = render_inlines_escaped(child, preprocessed);
+                out.push_str(&format!("\\emph{{{inner}}}"));
+            }
+            comrak::nodes::NodeValue::Strong => {
+                let inner = render_inlines_escaped(child, preprocessed);
+                out.push_str(&format!("\\textbf{{{inner}}}"));
+            }
+            comrak::nodes::NodeValue::Math(math) => {
+                if math.display_math {
+                    out.push_str(&render_display_math(&math.literal));
+                } else {
+                    out.push('$');
+                    out.push_str(&math.literal);
+                    out.push('$');
+                }
+            }
+            comrak::nodes::NodeValue::SoftBreak => out.push('\n'),
+            comrak::nodes::NodeValue::LineBreak => out.push('\n'),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn escape_latex_text(text: &str) -> String {
+    escape_latex_text_inner(text, None)
+}
+
+fn escape_latex_text_restore_trailing_space_sentinel(
+    text: &str,
+    trailing_space_sentinel: char,
+) -> String {
+    escape_latex_text_inner(text, Some(trailing_space_sentinel))
+}
+
+fn escape_latex_text_inner(text: &str, trailing_space_sentinel: Option<char>) -> String {
+    let mut out = String::new();
+    for mut ch in text.chars() {
+        if trailing_space_sentinel == Some(ch) {
+            ch = ' ';
+        }
+
+        match ch {
+            '&' => out.push_str("\\&"),
+            '%' => out.push_str("\\%"),
+            '$' => out.push_str("\\$"),
+            '#' => out.push_str("\\#"),
+            '_' => out.push_str("\\_"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '~' => out.push_str("\\textasciitilde{}"),
+            '^' => out.push_str("\\textasciicircum{}"),
+            '\\' => out.push_str("\\textbackslash{}"),
+            _ => out.push(ch),
         }
     }
     out
@@ -397,6 +479,81 @@ fn render_code_block(code_block: &comrak::nodes::NodeCodeBlock) -> String {
     out
 }
 
+fn render_table<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    indent: usize,
+    table: &comrak::nodes::NodeTable,
+    preprocessed: &PreprocessedMarkdown,
+) -> String {
+    let mut spec = String::new();
+    for index in 0..table.num_columns {
+        let align = table
+            .alignments
+            .get(index)
+            .copied()
+            .unwrap_or(comrak::nodes::TableAlignment::None);
+        spec.push(match align {
+            comrak::nodes::TableAlignment::Center => 'c',
+            comrak::nodes::TableAlignment::Right => 'r',
+            comrak::nodes::TableAlignment::Left | comrak::nodes::TableAlignment::None => 'l',
+        });
+    }
+
+    let mut lines = Vec::new();
+    lines.push(indent_line(
+        indent,
+        format!("\\begin{{tabular}}{{{spec}}}"),
+    ));
+    lines.push(indent_line(indent + 4, "\\hline"));
+
+    for row in node.children() {
+        if !matches!(
+            &row.data.borrow().value,
+            comrak::nodes::NodeValue::TableRow(_)
+        ) {
+            continue;
+        }
+
+        let mut cells = Vec::new();
+        for cell in row.children().take(table.num_columns) {
+            if matches!(
+                &cell.data.borrow().value,
+                comrak::nodes::NodeValue::TableCell
+            ) {
+                cells.push(render_inlines_escaped(cell, preprocessed));
+            }
+        }
+        while cells.len() < table.num_columns {
+            cells.push(String::new());
+        }
+
+        lines.push(indent_line(indent + 4, format_table_row(&cells)));
+        lines.push(indent_line(indent + 4, "\\\\\\hline"));
+    }
+
+    lines.push(indent_line(indent, "\\end{tabular}"));
+    lines.join("\n")
+}
+
+fn format_table_row(cells: &[String]) -> String {
+    let mut out = String::new();
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            out.push_str(" & ");
+        }
+        out.push_str(cell);
+    }
+
+    if out.starts_with(" & ") {
+        out.remove(0);
+    }
+    if out.ends_with(" & ") {
+        out.pop();
+    }
+
+    out
+}
+
 fn render_html_block(html: &comrak::nodes::NodeHtmlBlock, indent: usize) -> Option<String> {
     let images = parse_html_img_tags(&html.literal);
     if !images.is_empty() {
@@ -417,33 +574,13 @@ fn render_html_block(html: &comrak::nodes::NodeHtmlBlock, indent: usize) -> Opti
     None
 }
 
-fn escape_latex_path(path: &str) -> String {
-    let mut out = String::new();
-    for ch in path.chars() {
-        match ch {
-            '&' => out.push_str("\\&"),
-            '%' => out.push_str("\\%"),
-            '$' => out.push_str("\\$"),
-            '#' => out.push_str("\\#"),
-            '_' => out.push_str("\\_"),
-            '{' => out.push_str("\\{"),
-            '}' => out.push_str("\\}"),
-            '~' => out.push_str("\\textasciitilde{}"),
-            '^' => out.push_str("\\textasciicircum{}"),
-            '\\' => out.push_str("\\textbackslash{}"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
 enum IncludeGraphicsOption {
     Scale(f64),
     WidthTextWidth(f64),
 }
 
 fn render_includegraphics(url: &str, option: Option<IncludeGraphicsOption>) -> String {
-    let url = escape_latex_path(url);
+    let url = escape_latex_text(url);
     match option {
         Some(IncludeGraphicsOption::Scale(scale)) => {
             format!("\\includegraphics[scale={scale:.2}]{{{url}}}")

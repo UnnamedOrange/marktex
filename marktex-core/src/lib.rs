@@ -1,10 +1,18 @@
 // Copyright (c) UnnamedOrange. Licensed under the MIT License.
 // See the LICENSE file in the repository root for full license text.
 
+pub mod config;
+
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub use config::Options;
+
 pub fn compile_str(markdown: &str) -> Result<String> {
+    compile_str_with_options(markdown, &Options::default())
+}
+
+pub fn compile_str_with_options(markdown: &str, _options: &Options) -> Result<String> {
     let preprocessed = preprocess_markdown(markdown);
     let arena = comrak::Arena::new();
     let options = comrak_options();

@@ -4,6 +4,7 @@
 pub mod config;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -19,8 +20,12 @@ pub fn compile_str_with_options(markdown: &str, options: &Options) -> Result<Str
     let arena = comrak::Arena::new();
     let comrak_options = comrak_options();
     let root = comrak::parse_document(&arena, &preprocessed.markdown, &comrak_options);
+    let heading_index = options
+        .enable_heading_xref
+        .then(|| HeadingIndex::new(root, &preprocessed));
     let _runtime_guard = RenderRuntimeGuard::new(RenderRuntime {
         options: options.clone(),
+        heading_index,
     });
 
     let mut blocks = Vec::new();
@@ -66,8 +71,132 @@ struct RenderedBlock {
     text: String,
 }
 
+struct HeadingEntry {
+    text: String,
+    line: usize,
+    label: String,
+}
+
+struct HeadingIndex {
+    entries: Vec<HeadingEntry>,
+    labels_by_node: HashMap<usize, String>,
+}
+
+impl HeadingIndex {
+    fn new<'a>(root: &'a comrak::nodes::AstNode<'a>, preprocessed: &PreprocessedMarkdown) -> Self {
+        let mut entries = Vec::new();
+        let mut labels_by_node = HashMap::new();
+        collect_heading_entries(root, preprocessed, &mut entries, &mut labels_by_node);
+        Self {
+            entries,
+            labels_by_node,
+        }
+    }
+
+    fn label_for_node<'a>(&self, node: &'a comrak::nodes::AstNode<'a>) -> Option<&str> {
+        self.labels_by_node
+            .get(&(node as *const _ as usize))
+            .map(String::as_str)
+    }
+
+    fn resolve_label(&self, target: &str, current_line: usize) -> Option<&str> {
+        let mut nearest_above = None;
+        let mut first_below = None;
+        for entry in self.entries.iter().filter(|entry| entry.text == target) {
+            if entry.line <= current_line {
+                nearest_above = Some(entry);
+            } else if first_below.is_none() {
+                first_below = Some(entry);
+            }
+        }
+        nearest_above
+            .or(first_below)
+            .map(|entry| entry.label.as_str())
+    }
+}
+
+fn collect_heading_entries<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+    entries: &mut Vec<HeadingEntry>,
+    labels_by_node: &mut HashMap<usize, String>,
+) {
+    if matches!(
+        node.data.borrow().value,
+        comrak::nodes::NodeValue::Heading(_)
+    ) {
+        let label = format!("sec:{:04}", entries.len() + 1);
+        entries.push(HeadingEntry {
+            text: collect_heading_text(node, preprocessed),
+            line: node_source_line(node),
+            label: label.clone(),
+        });
+        labels_by_node.insert(node as *const _ as usize, label);
+    }
+
+    for child in node.children() {
+        collect_heading_entries(child, preprocessed, entries, labels_by_node);
+    }
+}
+
+fn collect_heading_text<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+) -> String {
+    let mut out = String::new();
+    collect_heading_text_to(node, preprocessed, &mut out);
+    out
+}
+
+fn collect_heading_text_to<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+    out: &mut String,
+) {
+    for child in node.children() {
+        match &child.data.borrow().value {
+            comrak::nodes::NodeValue::Text(text) => {
+                out.push_str(&restore_trailing_space_sentinel(
+                    text,
+                    preprocessed.trailing_space_sentinel,
+                ));
+            }
+            comrak::nodes::NodeValue::Code(code) => {
+                out.push_str(&restore_trailing_space_sentinel(
+                    &code.literal,
+                    preprocessed.trailing_space_sentinel,
+                ));
+            }
+            comrak::nodes::NodeValue::Math(math) => {
+                if math.display_math {
+                    out.push_str(&render_display_math(
+                        &math.literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
+                } else {
+                    out.push('$');
+                    out.push_str(&restore_trailing_space_sentinel(
+                        &math.literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
+                    out.push('$');
+                }
+            }
+            comrak::nodes::NodeValue::SoftBreak | comrak::nodes::NodeValue::LineBreak => {
+                out.push('\n')
+            }
+            _ => collect_heading_text_to(child, preprocessed, out),
+        }
+    }
+}
+
+fn node_source_line<'a>(node: &'a comrak::nodes::AstNode<'a>) -> usize {
+    node.data.borrow().sourcepos.start.line
+}
+
 struct RenderRuntime {
     options: Options,
+    heading_index: Option<HeadingIndex>,
 }
 
 thread_local! {
@@ -102,6 +231,27 @@ fn force_figure_strict_here() -> bool {
     with_runtime(|runtime| runtime.is_some_and(|runtime| runtime.options.force_figure_strict_here))
 }
 
+fn heading_label_for_node<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<String> {
+    with_runtime(|runtime| {
+        runtime
+            .filter(|runtime| runtime.options.enable_heading_xref)
+            .and_then(|runtime| runtime.heading_index.as_ref())
+            .and_then(|index| index.label_for_node(node))
+            .map(str::to_string)
+    })
+}
+
+fn resolve_heading_label(url: &str, source_line: usize) -> Option<String> {
+    let target = url.strip_prefix('#')?;
+    with_runtime(|runtime| {
+        runtime
+            .filter(|runtime| runtime.options.enable_heading_xref)
+            .and_then(|runtime| runtime.heading_index.as_ref())
+            .and_then(|index| index.resolve_label(target, source_line))
+            .map(str::to_string)
+    })
+}
+
 fn block_separator(prev: &RenderedBlock, next: &RenderedBlock) -> &'static str {
     match (prev.sourcepos, next.sourcepos) {
         (Some(prev), Some(next)) => {
@@ -124,16 +274,19 @@ fn render_block<'a>(
         comrak::nodes::NodeValue::Paragraph => Some(render_paragraph(node, indent, preprocessed)),
         comrak::nodes::NodeValue::Heading(heading) => {
             let content = render_inlines(node, preprocessed);
+            let label_suffix = heading_label_for_node(node)
+                .map(|label| format!("\\label{{{label}}}"))
+                .unwrap_or_default();
             let command = match heading.level {
                 1 => "chapter",
                 2 => "section",
                 3 => "subsection",
                 4 => "subsubsection",
-                _ => return Some(indent_multiline(indent, content)),
+                _ => return Some(indent_multiline(indent, format!("{content}{label_suffix}"))),
             };
             Some(indent_multiline(
                 indent,
-                format!("\\{command}{{{content}}}"),
+                format!("\\{command}{{{content}}}{label_suffix}"),
             ))
         }
         comrak::nodes::NodeValue::BlockQuote => {
@@ -148,7 +301,9 @@ fn render_block<'a>(
         )),
         comrak::nodes::NodeValue::HtmlBlock(html) => render_html_block(html, indent, preprocessed),
         comrak::nodes::NodeValue::List(list) => Some(render_list(node, indent, list, preprocessed)),
-        comrak::nodes::NodeValue::Table(table) => Some(render_table(node, indent, table, preprocessed)),
+        comrak::nodes::NodeValue::Table(table) => {
+            Some(render_table(node, indent, table, preprocessed))
+        }
         comrak::nodes::NodeValue::ThematicBreak => Some(indent_line(indent, "\\bigskip")),
         _ => None,
     }
@@ -271,7 +426,11 @@ fn render_inlines_with_references<'a>(
                 );
                 if url.starts_with('#') {
                     let text = render_inlines_with_references(child, preprocessed, allow_footnotes);
-                    out.push_str(&text);
+                    if let Some(label) = resolve_heading_label(&url, node_source_line(child)) {
+                        out.push_str(&format!("\\hyperref[{label}]{{{text}}}"));
+                    } else {
+                        out.push_str(&text);
+                    }
                 } else if link_text_is_exact_url(child, &url, preprocessed.trailing_space_sentinel)
                 {
                     let (url, suffix) = split_trailing_url_punctuation(&url);

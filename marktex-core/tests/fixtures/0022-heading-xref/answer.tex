@@ -1,0 +1,26 @@
+\chapter{标题交叉引用}\label{sec:0001}
+
+启用标题交叉引用后，上下文中保存已经出现过的标题数量，参见\hyperref[sec:0002]{下文}以及\hyperref[sec:0005]{更后面的内容}。
+
+\section{保存方法}\label{sec:0002}
+
+保存一个数字即可。
+
+\subsection{重复的东西怎么办？}\label{sec:0003}
+
+如果有重复的，引用在它上面的最近的一个，比如\hyperref[sec:0003]{这样}。
+\subsection{重复的东西怎么办？}\label{sec:0004}
+
+如果有重复的，引用在它上面的最近的一个，比如\hyperref[sec:0004]{这样}。
+
+\section{要是有复杂的东西怎么办？}\label{sec:0005}
+
+如果标题里有复杂的内容，只要原样相等，就认为匹配了。
+
+\subsubsection{至少要复杂到这个程度是 OK 的}\label{sec:0006}
+
+参见\hyperref[sec:0006]{这个 $z_{\text{$(x * y)$ ok}} \ne 1$ 标题}
+
+\subsubsection{没有出现过怎么办？}\label{sec:0007}
+
+只要引用了\textbf{当前文件中}\textbf{没有出现过}的标题名，就直接不增加新的引用。暂时不允许跨文件引用。

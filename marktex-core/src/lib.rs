@@ -743,13 +743,15 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
             continue;
         }
 
+        let content = normalize_heading_anchor_links(content, trailing_space_sentinel);
         if let Some(encoded) =
-            encode_space_before_trailing_closing_strong(content, trailing_space_sentinel)
+            encode_space_before_trailing_closing_strong(&content, trailing_space_sentinel)
         {
             out.push_str(&encoded);
             out.push_str(newline);
         } else {
-            out.push_str(line);
+            out.push_str(&content);
+            out.push_str(newline);
         }
     }
 
@@ -760,6 +762,59 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
         math_block_placeholder_prefix,
         trailing_space_sentinel,
     }
+}
+
+fn normalize_heading_anchor_links(text: &str, trailing_space_sentinel: char) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+
+    while let Some(rel_open) = text[cursor..].find('[') {
+        let open = cursor + rel_open;
+        out.push_str(&text[cursor..open]);
+        if is_escaped_at(text, open) {
+            out.push('[');
+            cursor = open + '['.len_utf8();
+            continue;
+        }
+
+        let Some(close) = find_unescaped_char(text, open + '['.len_utf8(), ']') else {
+            out.push_str(&text[open..]);
+            return out;
+        };
+        let after_close = close + ']'.len_utf8();
+        if !text[after_close..].starts_with('(') {
+            out.push('[');
+            cursor = open + '['.len_utf8();
+            continue;
+        }
+
+        let dest_start = after_close + '('.len_utf8();
+        let Some(dest_end) = find_link_destination_end(text, dest_start) else {
+            out.push('[');
+            cursor = open + '['.len_utf8();
+            continue;
+        };
+
+        let dest = &text[dest_start..dest_end];
+        out.push_str(&text[open..dest_start]);
+        if dest.starts_with('#') && dest.chars().any(char::is_whitespace) {
+            out.push('#');
+            for ch in dest['#'.len_utf8()..].chars() {
+                if ch.is_whitespace() {
+                    out.push(trailing_space_sentinel);
+                } else {
+                    out.push(ch);
+                }
+            }
+        } else {
+            out.push_str(dest);
+        }
+        out.push(')');
+        cursor = dest_end + ')'.len_utf8();
+    }
+
+    out.push_str(&text[cursor..]);
+    out
 }
 
 fn encode_space_before_trailing_closing_strong(

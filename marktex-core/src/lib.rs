@@ -3,6 +3,8 @@
 
 pub mod config;
 
+use std::cell::RefCell;
+
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -12,11 +14,14 @@ pub fn compile_str(markdown: &str) -> Result<String> {
     compile_str_with_options(markdown, &Options::default())
 }
 
-pub fn compile_str_with_options(markdown: &str, _options: &Options) -> Result<String> {
+pub fn compile_str_with_options(markdown: &str, options: &Options) -> Result<String> {
     let preprocessed = preprocess_markdown(markdown);
     let arena = comrak::Arena::new();
-    let options = comrak_options();
-    let root = comrak::parse_document(&arena, &preprocessed.markdown, &options);
+    let comrak_options = comrak_options();
+    let root = comrak::parse_document(&arena, &preprocessed.markdown, &comrak_options);
+    let _runtime_guard = RenderRuntimeGuard::new(RenderRuntime {
+        options: options.clone(),
+    });
 
     let mut blocks = Vec::new();
     for node in root.children() {
@@ -59,6 +64,42 @@ fn comrak_options() -> comrak::Options<'static> {
 struct RenderedBlock {
     sourcepos: Option<comrak::nodes::Sourcepos>,
     text: String,
+}
+
+struct RenderRuntime {
+    options: Options,
+}
+
+thread_local! {
+    static RENDER_RUNTIME: RefCell<Option<RenderRuntime>> = const { RefCell::new(None) };
+}
+
+struct RenderRuntimeGuard {
+    previous: Option<RenderRuntime>,
+}
+
+impl RenderRuntimeGuard {
+    fn new(runtime: RenderRuntime) -> Self {
+        let previous = RENDER_RUNTIME.with(|current| current.replace(Some(runtime)));
+        Self { previous }
+    }
+}
+
+impl Drop for RenderRuntimeGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        RENDER_RUNTIME.with(|current| {
+            current.replace(previous);
+        });
+    }
+}
+
+fn with_runtime<T>(f: impl FnOnce(Option<&RenderRuntime>) -> T) -> T {
+    RENDER_RUNTIME.with(|runtime| f(runtime.borrow().as_ref()))
+}
+
+fn force_figure_strict_here() -> bool {
+    with_runtime(|runtime| runtime.is_some_and(|runtime| runtime.options.force_figure_strict_here))
 }
 
 fn block_separator(prev: &RenderedBlock, next: &RenderedBlock) -> &'static str {
@@ -1251,7 +1292,11 @@ fn format_f64_trimmed_2(value: f64) -> String {
 
 fn render_figure(indent: usize, includegraphics: &str) -> String {
     let mut lines = Vec::new();
-    lines.push(indent_line(indent, "\\begin{figure}"));
+    if force_figure_strict_here() {
+        lines.push(indent_line(indent, "\\begin{figure}[H]"));
+    } else {
+        lines.push(indent_line(indent, "\\begin{figure}"));
+    }
     lines.push(indent_line(indent + 4, "\\centering"));
     lines.push(indent_line(indent + 4, includegraphics));
     lines.push(indent_line(indent, "\\end{figure}"));

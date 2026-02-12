@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::Path;
 
+use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::NamedTempFile;
 
@@ -24,7 +25,14 @@ fn read_expected_tex(fixture_dir: &Path) -> datatest_stable::Result<String> {
     Ok(fs::read_to_string(answer_path)?)
 }
 
-// 对每个 fixture：输出文件与 stdout 都应与答案一致的 LaTeX。
+fn append_optional_config_arg(cmd: &mut Command, fixture_dir: &Path) {
+    let config_path = fixture_dir.join("config.yaml");
+    if config_path.exists() {
+        cmd.arg("--config").arg(config_path);
+    }
+}
+
+// 对每个 fixture：输出文件与 stdout 都应在可选配置下与答案一致。
 fn golden_cli_case(path: &Path) -> datatest_stable::Result<()> {
     let fixture_dir = path
         .parent()
@@ -32,17 +40,17 @@ fn golden_cli_case(path: &Path) -> datatest_stable::Result<()> {
     let expected = read_expected_tex(fixture_dir)?;
 
     let output = NamedTempFile::new()?;
-    cargo_bin_cmd!("marktex")
-        .arg("-o")
-        .arg(output.path())
-        .arg(path)
-        .assert()
-        .success();
+    let mut compile_to_file_cmd = cargo_bin_cmd!("marktex");
+    compile_to_file_cmd.arg("-o").arg(output.path());
+    append_optional_config_arg(&mut compile_to_file_cmd, fixture_dir);
+    compile_to_file_cmd.arg(path).assert().success();
 
     let actual = fs::read_to_string(output.path())?;
     assert_eq!(actual, expected);
 
-    cargo_bin_cmd!("marktex")
+    let mut compile_to_stdout_cmd = cargo_bin_cmd!("marktex");
+    append_optional_config_arg(&mut compile_to_stdout_cmd, fixture_dir);
+    compile_to_stdout_cmd
         .arg(path)
         .assert()
         .success()

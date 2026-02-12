@@ -4,13 +4,27 @@
 use std::fs;
 use std::path::Path;
 
-// 每个 fixture 用例都应编译为期望的 LaTeX 输出。
+fn read_fixture_options(
+    fixture_dir: &Path,
+) -> datatest_stable::Result<marktex_core::config::Options> {
+    let config_path = fixture_dir.join("config.yaml");
+    if config_path.exists() {
+        Ok(marktex_core::config::load_options_from_yaml_file(
+            config_path.as_path(),
+        )?)
+    } else {
+        Ok(marktex_core::config::Options::default())
+    }
+}
+
+// 每个 fixture 用例都应读取可选配置并编译为期望的 LaTeX 输出。
 fn golden_case(path: &Path) -> datatest_stable::Result<()> {
     let input = fs::read_to_string(path)?;
 
     let fixture_dir = path
         .parent()
         .ok_or_else(|| "fixture input path should have a parent directory")?;
+    let options = read_fixture_options(fixture_dir)?;
 
     let mut tex_files = fixture_dir
         .read_dir()?
@@ -26,7 +40,7 @@ fn golden_case(path: &Path) -> datatest_stable::Result<()> {
     };
 
     let expected = fs::read_to_string(answer_path)?;
-    let actual = marktex_core::compile_str(&input)?;
+    let actual = marktex_core::compile_str_with_options(&input, &options)?;
 
     assert_eq!(actual, expected);
     Ok(())

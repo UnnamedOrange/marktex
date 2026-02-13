@@ -21,6 +21,7 @@ Example `config.yml`:
 ```yaml
 enable_advanced_xref: true
 enable_center_as_figure_caption: true
+enable_figure_relative_xref: true
 enable_heading_xref: true
 force_figure_strict_here: true
 ```
@@ -31,6 +32,7 @@ Options:
 | --------------------------------- | ------ | ------- | ------------------------------------------------------------ |
 | `enable_advanced_xref`            | `bool` | `false` | Reuse `*...*` as advanced semantics: reference and index entries for other terms. |
 | `enable_center_as_figure_caption` | `bool` | `false` | Treat a `<center>...</center>` block adjacent to a standalone image block as figure caption and optional label source. |
+| `enable_figure_relative_xref`     | `bool` | `false` | Enable relative figure references (`*上图*`/`*下图*`). This option only takes effect when `enable_advanced_xref` is also `true`. |
 | `enable_heading_xref`             | `bool` | `false` | Convert heading anchor links (`[text](#heading)`) to `\hyperref[...]` when resolvable. |
 | `force_figure_strict_here`        | `bool` | `false` | Set placement arguments of float images to `[H]`.            |
 

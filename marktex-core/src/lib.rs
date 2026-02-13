@@ -11,21 +11,75 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub use config::Options;
 
-pub fn compile_str(markdown: &str) -> Result<String> {
-    compile_str_with_options(markdown, &Options::default())
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Context {
+    next_heading_label: usize,
+    next_figure_label: usize,
 }
 
-pub fn compile_str_with_options(markdown: &str, options: &Options) -> Result<String> {
+impl Default for Context {
+    fn default() -> Self {
+        Self {
+            next_heading_label: 1,
+            next_figure_label: 1,
+        }
+    }
+}
+
+pub fn compile_many_with_options(markdowns: &[String], options: &Options) -> Result<String> {
+    let mut context = Context::default();
+    compile_many_with_options_and_context(markdowns, options, &mut context)
+}
+
+fn compile_many_with_options_and_context(
+    markdowns: &[String],
+    options: &Options,
+    context: &mut Context,
+) -> Result<String> {
+    let mut rendered_documents = Vec::new();
+    for markdown in markdowns {
+        let rendered = compile_one_with_options_and_context(markdown, options, context)?;
+        if !rendered.is_empty() {
+            rendered_documents.push(rendered);
+        }
+    }
+
+    if rendered_documents.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut out = String::new();
+    for (index, rendered) in rendered_documents.iter().enumerate() {
+        if index > 0 {
+            out.push_str("\n\n");
+        }
+        out.push_str(rendered.trim_end_matches('\n'));
+    }
+    out.push('\n');
+    Ok(out)
+}
+
+fn compile_one_with_options_and_context(
+    markdown: &str,
+    options: &Options,
+    context: &mut Context,
+) -> Result<String> {
     let preprocessed = preprocess_markdown(markdown);
     let arena = comrak::Arena::new();
     let comrak_options = comrak_options();
     let root = comrak::parse_document(&arena, &preprocessed.markdown, &comrak_options);
     let heading_index = options
         .enable_heading_xref
-        .then(|| HeadingIndex::new(root, &preprocessed));
+        .then(|| HeadingIndex::new(root, &preprocessed, context.next_heading_label));
+    if let Some(index) = heading_index.as_ref() {
+        context.next_heading_label += index.generated_count();
+    }
     let figure_index = options
         .enable_center_as_figure_caption
-        .then(|| FigureIndex::new(root, &preprocessed));
+        .then(|| FigureIndex::new(root, &preprocessed, context.next_figure_label));
+    if let Some(index) = figure_index.as_ref() {
+        context.next_figure_label += index.generated_count();
+    }
     let _runtime_guard = RenderRuntimeGuard::new(RenderRuntime {
         options: options.clone(),
         heading_index,
@@ -92,14 +146,29 @@ struct HeadingIndex {
 }
 
 impl HeadingIndex {
-    fn new<'a>(root: &'a comrak::nodes::AstNode<'a>, preprocessed: &PreprocessedMarkdown) -> Self {
+    fn new<'a>(
+        root: &'a comrak::nodes::AstNode<'a>,
+        preprocessed: &PreprocessedMarkdown,
+        next_heading_label: usize,
+    ) -> Self {
         let mut entries = Vec::new();
         let mut labels_by_node = HashMap::new();
-        collect_heading_entries(root, preprocessed, &mut entries, &mut labels_by_node);
+        let mut next_heading_label = next_heading_label;
+        collect_heading_entries(
+            root,
+            preprocessed,
+            &mut entries,
+            &mut labels_by_node,
+            &mut next_heading_label,
+        );
         Self {
             entries,
             labels_by_node,
         }
+    }
+
+    fn generated_count(&self) -> usize {
+        self.entries.len()
     }
 
     fn label_for_node<'a>(&self, node: &'a comrak::nodes::AstNode<'a>) -> Option<&str> {
@@ -144,12 +213,16 @@ struct FigureIndex {
 }
 
 impl FigureIndex {
-    fn new<'a>(root: &'a comrak::nodes::AstNode<'a>, preprocessed: &PreprocessedMarkdown) -> Self {
+    fn new<'a>(
+        root: &'a comrak::nodes::AstNode<'a>,
+        preprocessed: &PreprocessedMarkdown,
+        next_figure_label: usize,
+    ) -> Self {
         let top_level_nodes = root.children().collect::<Vec<_>>();
         let mut entries = Vec::new();
         let mut annotations_by_node = HashMap::new();
         let mut consumed_center_count_by_node = HashMap::new();
-        let mut next_figure_label = 1usize;
+        let mut next_figure_label = next_figure_label;
 
         let mut apply_caption = |annotation: &mut FigureAnnotation, content: &str, line: usize| {
             annotation.consume_following_center = true;
@@ -245,6 +318,10 @@ impl FigureIndex {
         }
     }
 
+    fn generated_count(&self) -> usize {
+        self.entries.len()
+    }
+
     fn annotation_for_node<'a>(
         &self,
         node: &'a comrak::nodes::AstNode<'a>,
@@ -285,12 +362,14 @@ fn collect_heading_entries<'a>(
     preprocessed: &PreprocessedMarkdown,
     entries: &mut Vec<HeadingEntry>,
     labels_by_node: &mut HashMap<usize, String>,
+    next_heading_label: &mut usize,
 ) {
     if matches!(
         node.data.borrow().value,
         comrak::nodes::NodeValue::Heading(_)
     ) {
-        let label = format!("sec:{:04}", entries.len() + 1);
+        let label = format!("sec:{:04}", *next_heading_label);
+        *next_heading_label += 1;
         entries.push(HeadingEntry {
             text: collect_heading_text(node, preprocessed),
             line: node_source_line(node),
@@ -300,7 +379,13 @@ fn collect_heading_entries<'a>(
     }
 
     for child in node.children() {
-        collect_heading_entries(child, preprocessed, entries, labels_by_node);
+        collect_heading_entries(
+            child,
+            preprocessed,
+            entries,
+            labels_by_node,
+            next_heading_label,
+        );
     }
 }
 

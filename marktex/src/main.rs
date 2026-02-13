@@ -26,10 +26,10 @@ fn main() {
         }
     };
 
-    let mut out = String::new();
+    let mut inputs = Vec::new();
     for input in &args.inputs {
         match std::fs::read_to_string(input) {
-            Ok(content) => out.push_str(&content),
+            Ok(content) => inputs.push(content),
             Err(err) => {
                 eprintln!("无法读取输入文件 {}: {err}", input.display());
                 std::process::exit(1);
@@ -37,7 +37,7 @@ fn main() {
         }
     }
 
-    let out = match marktex_core::compile_str_with_options(&out, &options) {
+    let out = match marktex_core::compile_many_with_options(&inputs, &options) {
         Ok(output) => output,
         Err(err) => {
             eprintln!("无法编译输入文件: {err}");

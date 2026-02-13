@@ -12,6 +12,7 @@ pub struct Options {
     pub enable_heading_xref: bool,
     pub enable_center_as_figure_caption: bool,
     pub enable_advanced_xref: bool,
+    pub enable_figure_relative_xref: bool,
 }
 
 pub fn load_options_from_yaml_file(path: &Path) -> crate::Result<Options> {

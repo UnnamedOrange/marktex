@@ -203,7 +203,8 @@ impl FigureIndex {
                         }
 
                         let mut annotation = FigureAnnotation::default();
-                        if let Some(HtmlBlockElement::Center(center)) = elements.get(elem_index + 1) {
+                        if let Some(HtmlBlockElement::Center(center)) = elements.get(elem_index + 1)
+                        {
                             apply_caption(&mut annotation, center, node_line);
                         } else if elem_index + 1 == elements.len()
                             && let Some(next) = top_level_nodes.get(index + 1).copied()
@@ -551,13 +552,11 @@ fn figure_include_for_paragraph<'a>(
     }
 
     match &only.data.borrow().value {
-        comrak::nodes::NodeValue::Image(image) => {
-            Some(render_includegraphics(
-                &image.url,
-                None,
-                preprocessed.trailing_space_sentinel,
-            ))
-        }
+        comrak::nodes::NodeValue::Image(image) => Some(render_includegraphics(
+            &image.url,
+            None,
+            preprocessed.trailing_space_sentinel,
+        )),
         comrak::nodes::NodeValue::HtmlInline(html) => {
             let image = parse_html_img_tag(html)?;
             Some(render_includegraphics(
@@ -1936,14 +1935,14 @@ fn parse_html_block_elements(html: &str) -> Vec<HtmlBlockElement> {
     let mut out = Vec::new();
 
     while !rest.is_empty() {
-        if rest.starts_with("<img") {
-            if let Some(end) = rest.find('>') {
-                let tag = &rest[..=end];
-                if let Some(image) = parse_html_img_tag(tag) {
-                    out.push(HtmlBlockElement::Image(image));
-                    rest = rest[end + 1..].trim_start();
-                    continue;
-                }
+        if rest.starts_with("<img")
+            && let Some(end) = rest.find('>')
+        {
+            let tag = &rest[..=end];
+            if let Some(image) = parse_html_img_tag(tag) {
+                out.push(HtmlBlockElement::Image(image));
+                rest = rest[end + 1..].trim_start();
+                continue;
             }
         }
 

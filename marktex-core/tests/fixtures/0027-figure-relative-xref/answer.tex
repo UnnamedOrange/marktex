@@ -1,0 +1,35 @@
+开头写\emph{上图}，前面没有块级图，应降级为普通强调。
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/a1.jpg}
+    \caption{}
+    \label{relfig:0001}
+\end{figure}
+
+这里的图 \ref{relfig:0001}应命中上一张无标题块级图。
+
+这里有一张内联图片 \includegraphics{assets/inline.jpg} ，它不应进入相对目标池，后面的图 \ref{relfig:0001}仍命中 a1。
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/a2.jpg}
+    \caption{第一张有标题图}
+    \label{fig:0001}
+    \label{relfig:0002}
+\end{figure}
+
+这里的图 \ref{fig:0001} 应保持旧语义并命中有标题图，图 \ref{relfig:0002}也该命中它。
+
+这里的图 \ref{relfig:0003}应命中后面的无标题块级图。
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/a3.jpg}
+    \caption{}
+    \label{relfig:0003}
+\end{figure}
+
+这里的图 \ref{relfig:0003}应优先命中最近上一张图（a3）。
+
+结尾写\emph{下图}，后面没有块级图，应降级为普通强调。

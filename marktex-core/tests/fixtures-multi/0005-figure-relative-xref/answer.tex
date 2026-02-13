@@ -1,0 +1,21 @@
+\begin{figure}
+    \centering
+    \includegraphics{assets/a1.jpg}
+    \caption{}
+    \label{relfig:0001}
+\end{figure}
+
+第一份文件末尾写\emph{下图}，后面没有本文件图片，不允许跨文件引用，应降级。
+
+第二份文件开头写\emph{上图}，前面没有本文件图片，不允许跨文件引用，应降级。
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/b1.jpg}
+    \caption{}
+    \label{relfig:0002}
+\end{figure}
+
+第二份文件里的图 \ref{relfig:0002}应命中本文件中最近的上一张无标题块级图。
+
+第二份文件末尾写\emph{下图}，后面没有本文件图片，应降级。

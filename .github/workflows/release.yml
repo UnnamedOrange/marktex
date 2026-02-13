@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and upload (${{ matrix.os }})
+    if: ${{ !github.event.act }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archive_suffix: linux-x86_64
+            archive_ext: .tar.gz
+          - os: macos-latest
+            archive_suffix: macos-aarch64
+            archive_ext: .tar.gz
+          - os: windows-latest
+            archive_suffix: windows-x86_64
+            archive_ext: .zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Prepare artifact names
+        id: vars
+        shell: bash
+        run: |
+          version="${{ github.event.release.tag_name }}"
+          version="${version#v}"
+          archive="marktex-${version}-${{ matrix.archive_suffix }}${{ matrix.archive_ext }}"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Package binary on Linux and macOS
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tar -czf "${{ steps.vars.outputs.archive }}" -C target/release marktex
+
+      - name: Package binary on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/release/marktex.exe -DestinationPath "${{ steps.vars.outputs.archive }}"
+
+      - name: Generate checksum on Linux and macOS
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          archive="${{ steps.vars.outputs.archive }}"
+          hash="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          printf '%s  %s\n' "$hash" "$archive" > "$archive.sha256"
+
+      - name: Generate checksum on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = "${{ steps.vars.outputs.archive }}"
+          $hash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$archive.sha256" -Value "$hash  $archive" -NoNewline
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "${{ steps.vars.outputs.archive }}" \
+            "${{ steps.vars.outputs.archive }}.sha256" \
+            --clobber
+
+  release-act:
+    name: Build package for act (ubuntu)
+    if: ${{ github.event.act }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Prepare artifact names
+        id: vars
+        shell: bash
+        run: |
+          version="${{ github.event.release.tag_name }}"
+          version="${version#v}"
+          archive="marktex-${version}-linux-x86_64.tar.gz"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Package binary
+        shell: bash
+        run: |
+          tar -czf "${{ steps.vars.outputs.archive }}" -C target/release marktex
+
+      - name: Generate checksum
+        shell: bash
+        run: |
+          archive="${{ steps.vars.outputs.archive }}"
+          hash="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          printf '%s  %s\n' "$hash" "$archive" > "$archive.sha256"
+
+      - name: Skip upload in act
+        run: echo "github.event.act=true detected, skip release asset upload."

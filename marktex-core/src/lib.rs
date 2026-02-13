@@ -23,16 +23,25 @@ pub fn compile_str_with_options(markdown: &str, options: &Options) -> Result<Str
     let heading_index = options
         .enable_heading_xref
         .then(|| HeadingIndex::new(root, &preprocessed));
+    let figure_index = options
+        .enable_center_as_figure_caption
+        .then(|| FigureIndex::new(root, &preprocessed));
     let _runtime_guard = RenderRuntimeGuard::new(RenderRuntime {
         options: options.clone(),
         heading_index,
+        figure_index,
     });
 
     let mut blocks = Vec::new();
     for node in root.children() {
         if let Some(block) = render_block(node, 0, &preprocessed) {
+            let mut sourcepos = node.data.borrow().sourcepos;
+            let consumed = consumed_center_count_for_node(node);
+            if consumed > 0 {
+                sourcepos.start.line = sourcepos.start.line.saturating_sub(consumed);
+            }
             blocks.push(RenderedBlock {
-                sourcepos: Some(node.data.borrow().sourcepos),
+                sourcepos: Some(sourcepos),
                 text: block,
             });
         }
@@ -103,6 +112,161 @@ impl HeadingIndex {
         let mut nearest_above = None;
         let mut first_below = None;
         for entry in self.entries.iter().filter(|entry| entry.text == target) {
+            if entry.line <= current_line {
+                nearest_above = Some(entry);
+            } else if first_below.is_none() {
+                first_below = Some(entry);
+            }
+        }
+        nearest_above
+            .or(first_below)
+            .map(|entry| entry.label.as_str())
+    }
+}
+
+#[derive(Clone, Default)]
+struct FigureAnnotation {
+    caption: Option<String>,
+    label: Option<String>,
+    consume_following_center: bool,
+}
+
+struct FigureEntry {
+    token: String,
+    line: usize,
+    label: String,
+}
+
+struct FigureIndex {
+    entries: Vec<FigureEntry>,
+    annotations_by_node: HashMap<usize, Vec<FigureAnnotation>>,
+    consumed_center_count_by_node: HashMap<usize, usize>,
+}
+
+impl FigureIndex {
+    fn new<'a>(root: &'a comrak::nodes::AstNode<'a>, preprocessed: &PreprocessedMarkdown) -> Self {
+        let top_level_nodes = root.children().collect::<Vec<_>>();
+        let mut entries = Vec::new();
+        let mut annotations_by_node = HashMap::new();
+        let mut consumed_center_count_by_node = HashMap::new();
+        let mut next_figure_label = 1usize;
+
+        let mut apply_caption = |annotation: &mut FigureAnnotation, content: &str, line: usize| {
+            annotation.consume_following_center = true;
+            let caption = parse_figure_caption(content);
+            annotation.caption = caption.caption;
+            if let Some(token) = caption.token {
+                let label = format!("fig:{next_figure_label:04}");
+                next_figure_label += 1;
+                entries.push(FigureEntry {
+                    token,
+                    line,
+                    label: label.clone(),
+                });
+                annotation.label = Some(label);
+            }
+        };
+
+        for (index, node) in top_level_nodes.iter().copied().enumerate() {
+            let node_line = node_source_line(node);
+            match &node.data.borrow().value {
+                comrak::nodes::NodeValue::Paragraph => {
+                    if figure_include_for_paragraph(node, preprocessed).is_none() {
+                        continue;
+                    }
+
+                    let mut annotation = FigureAnnotation::default();
+                    if let Some(next) = top_level_nodes.get(index + 1).copied()
+                        && let comrak::nodes::NodeValue::HtmlBlock(html) = &next.data.borrow().value
+                    {
+                        let first_center = parse_html_center_tags(&html.literal)
+                            .first()
+                            .cloned()
+                            .or_else(|| match parse_html_block_elements(&html.literal).first() {
+                                Some(HtmlBlockElement::Center(center)) => Some(center.clone()),
+                                _ => None,
+                            });
+                        if let Some(first_center) = first_center {
+                            apply_caption(&mut annotation, &first_center, node_line);
+                            consumed_center_count_by_node.insert(node_id(next), 1);
+                        }
+                    }
+
+                    annotations_by_node.insert(node_id(node), vec![annotation]);
+                }
+                comrak::nodes::NodeValue::HtmlBlock(html) => {
+                    let elements = parse_html_block_elements(&html.literal);
+                    let mut annotations = Vec::new();
+                    for (elem_index, element) in elements.iter().enumerate() {
+                        if !matches!(element, HtmlBlockElement::Image(_)) {
+                            continue;
+                        }
+
+                        let mut annotation = FigureAnnotation::default();
+                        if let Some(HtmlBlockElement::Center(center)) = elements.get(elem_index + 1) {
+                            apply_caption(&mut annotation, center, node_line);
+                        } else if elem_index + 1 == elements.len()
+                            && let Some(next) = top_level_nodes.get(index + 1).copied()
+                            && let comrak::nodes::NodeValue::HtmlBlock(next_html) =
+                                &next.data.borrow().value
+                        {
+                            let first_center = parse_html_center_tags(&next_html.literal)
+                                .first()
+                                .cloned()
+                                .or_else(|| {
+                                    match parse_html_block_elements(&next_html.literal).first() {
+                                        Some(HtmlBlockElement::Center(center)) => {
+                                            Some(center.clone())
+                                        }
+                                        _ => None,
+                                    }
+                                });
+                            if let Some(first_center) = first_center {
+                                apply_caption(&mut annotation, &first_center, node_line);
+                                consumed_center_count_by_node.insert(node_id(next), 1);
+                            }
+                        }
+                        annotations.push(annotation);
+                    }
+
+                    if !annotations.is_empty() {
+                        annotations_by_node.insert(node_id(node), annotations);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            entries,
+            annotations_by_node,
+            consumed_center_count_by_node,
+        }
+    }
+
+    fn annotation_for_node<'a>(
+        &self,
+        node: &'a comrak::nodes::AstNode<'a>,
+        figure_index: usize,
+    ) -> FigureAnnotation {
+        self.annotations_by_node
+            .get(&node_id(node))
+            .and_then(|annotations| annotations.get(figure_index))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn consumed_center_count_for_node<'a>(&self, node: &'a comrak::nodes::AstNode<'a>) -> usize {
+        self.consumed_center_count_by_node
+            .get(&node_id(node))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn resolve_label(&self, target: &str, current_line: usize) -> Option<&str> {
+        let mut nearest_above = None;
+        let mut first_below = None;
+        for entry in self.entries.iter().filter(|entry| entry.token == target) {
             if entry.line <= current_line {
                 nearest_above = Some(entry);
             } else if first_below.is_none() {
@@ -194,9 +358,14 @@ fn node_source_line<'a>(node: &'a comrak::nodes::AstNode<'a>) -> usize {
     node.data.borrow().sourcepos.start.line
 }
 
+fn node_id<'a>(node: &'a comrak::nodes::AstNode<'a>) -> usize {
+    node as *const _ as usize
+}
+
 struct RenderRuntime {
     options: Options,
     heading_index: Option<HeadingIndex>,
+    figure_index: Option<FigureIndex>,
 }
 
 thread_local! {
@@ -231,6 +400,10 @@ fn force_figure_strict_here() -> bool {
     with_runtime(|runtime| runtime.is_some_and(|runtime| runtime.options.force_figure_strict_here))
 }
 
+fn advanced_xref_enabled() -> bool {
+    with_runtime(|runtime| runtime.is_some_and(|runtime| runtime.options.enable_advanced_xref))
+}
+
 fn heading_label_for_node<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<String> {
     with_runtime(|runtime| {
         runtime
@@ -249,6 +422,35 @@ fn resolve_heading_label(url: &str, source_line: usize) -> Option<String> {
             .and_then(|runtime| runtime.heading_index.as_ref())
             .and_then(|index| index.resolve_label(target, source_line))
             .map(str::to_string)
+    })
+}
+
+fn resolve_figure_label(token: &str, source_line: usize) -> Option<String> {
+    with_runtime(|runtime| {
+        runtime
+            .and_then(|runtime| runtime.figure_index.as_ref())
+            .and_then(|index| index.resolve_label(token, source_line))
+            .map(str::to_string)
+    })
+}
+
+fn figure_annotation_for_node<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    figure_index: usize,
+) -> FigureAnnotation {
+    with_runtime(|runtime| {
+        runtime
+            .and_then(|runtime| runtime.figure_index.as_ref())
+            .map(|index| index.annotation_for_node(node, figure_index))
+            .unwrap_or_default()
+    })
+}
+
+fn consumed_center_count_for_node<'a>(node: &'a comrak::nodes::AstNode<'a>) -> usize {
+    with_runtime(|runtime| {
+        runtime
+            .and_then(|runtime| runtime.figure_index.as_ref())
+            .map_or(0, |index| index.consumed_center_count_for_node(node))
     })
 }
 
@@ -299,7 +501,9 @@ fn render_block<'a>(
             code_block,
             preprocessed.trailing_space_sentinel,
         )),
-        comrak::nodes::NodeValue::HtmlBlock(html) => render_html_block(html, indent, preprocessed),
+        comrak::nodes::NodeValue::HtmlBlock(html) => {
+            render_html_block(node, html, indent, preprocessed)
+        }
         comrak::nodes::NodeValue::List(list) => Some(render_list(node, indent, list, preprocessed)),
         comrak::nodes::NodeValue::Table(table) => {
             Some(render_table(node, indent, table, preprocessed))
@@ -326,6 +530,20 @@ fn render_paragraph_as_figure<'a>(
     indent: usize,
     preprocessed: &PreprocessedMarkdown,
 ) -> Option<String> {
+    let include = figure_include_for_paragraph(node, preprocessed)?;
+    let annotation = figure_annotation_for_node(node, 0);
+    Some(render_figure(
+        indent,
+        &include,
+        annotation.caption.as_deref(),
+        annotation.label.as_deref(),
+    ))
+}
+
+fn figure_include_for_paragraph<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+) -> Option<String> {
     let mut children = node.children();
     let only = children.next()?;
     if children.next().is_some() {
@@ -334,18 +552,19 @@ fn render_paragraph_as_figure<'a>(
 
     match &only.data.borrow().value {
         comrak::nodes::NodeValue::Image(image) => {
-            let include =
-                render_includegraphics(&image.url, None, preprocessed.trailing_space_sentinel);
-            Some(render_figure(indent, &include))
+            Some(render_includegraphics(
+                &image.url,
+                None,
+                preprocessed.trailing_space_sentinel,
+            ))
         }
         comrak::nodes::NodeValue::HtmlInline(html) => {
             let image = parse_html_img_tag(html)?;
-            let include = render_includegraphics(
+            Some(render_includegraphics(
                 &image.src,
                 image.option,
                 preprocessed.trailing_space_sentinel,
-            );
-            Some(render_figure(indent, &include))
+            ))
         }
         _ => None,
     }
@@ -410,7 +629,7 @@ fn render_inlines_with_references<'a>(
                         preprocessed.trailing_space_sentinel,
                     );
                     if inline_node_is_standalone_line(&children, index) {
-                        out.push_str(&render_figure(0, &include));
+                        out.push_str(&render_figure(0, &include, None, None));
                     } else {
                         out.push_str(&include);
                     }
@@ -445,6 +664,8 @@ fn render_inlines_with_references<'a>(
                 flush_pending_cites(&mut out, &mut pending_cites);
                 if let Some(inner) = emph_as_strong_emph(child, preprocessed) {
                     out.push_str(&format!("\\textbf{{\\emph{{{inner}}}}}"));
+                } else if let Some(advanced) = render_advanced_emph(child, preprocessed) {
+                    out.push_str(&advanced);
                 } else {
                     let inner =
                         render_inlines_with_references(child, preprocessed, allow_footnotes);
@@ -1171,6 +1392,157 @@ fn emph_as_strong_emph<'a>(
         .then(|| render_inlines(child, preprocessed))
 }
 
+fn render_advanced_emph<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+) -> Option<String> {
+    if !advanced_xref_enabled() {
+        return None;
+    }
+
+    let text = collect_inline_plain_text(node, preprocessed);
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(String::from("\\emph{}"));
+    }
+
+    if let Some(token) = parse_figure_reference_token(text) {
+        if let Some(label) = resolve_figure_label(token, node_source_line(node)) {
+            return Some(format!("图 \\ref{{{label}}}"));
+        }
+        return None;
+    }
+
+    let (display, entries) = parse_index_entries(text);
+    let mut out = String::new();
+    out.push_str("\\emph{");
+    out.push_str(&escape_latex_text(&display));
+    out.push('}');
+    for entry in entries {
+        out.push_str("\\index{");
+        out.push_str(&escape_latex_text(&entry));
+        out.push('}');
+    }
+    Some(out)
+}
+
+fn collect_inline_plain_text<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+) -> String {
+    let mut out = String::new();
+    collect_inline_plain_text_to(node, preprocessed, &mut out);
+    out
+}
+
+fn collect_inline_plain_text_to<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+    out: &mut String,
+) {
+    for child in node.children() {
+        match &child.data.borrow().value {
+            comrak::nodes::NodeValue::Text(text) => {
+                out.push_str(&restore_trailing_space_sentinel(
+                    text,
+                    preprocessed.trailing_space_sentinel,
+                ));
+            }
+            comrak::nodes::NodeValue::Code(code) => {
+                out.push_str(&restore_trailing_space_sentinel(
+                    &code.literal,
+                    preprocessed.trailing_space_sentinel,
+                ));
+            }
+            comrak::nodes::NodeValue::Math(math) => {
+                if math.display_math {
+                    out.push_str(&render_display_math(
+                        &math.literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
+                } else {
+                    out.push('$');
+                    out.push_str(&restore_trailing_space_sentinel(
+                        &math.literal,
+                        preprocessed.trailing_space_sentinel,
+                    ));
+                    out.push('$');
+                }
+            }
+            comrak::nodes::NodeValue::SoftBreak | comrak::nodes::NodeValue::LineBreak => {
+                out.push('\n')
+            }
+            _ => collect_inline_plain_text_to(child, preprocessed, out),
+        }
+    }
+}
+
+fn parse_figure_reference_token(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let rest = trimmed.strip_prefix('图')?;
+    if !starts_with_whitespace(rest) {
+        return None;
+    }
+    let token = rest.trim();
+    (!token.is_empty()).then_some(token)
+}
+
+fn parse_index_entries(text: &str) -> (String, Vec<String>) {
+    let text = text.trim();
+    let Some((left, inside)) = split_last_fullwidth_parenthesized(text) else {
+        return (text.to_string(), vec![text.to_string()]);
+    };
+
+    let left = left.trim_end();
+    let inside = inside.trim();
+    if left.is_empty() || inside.is_empty() {
+        return (text.to_string(), vec![text.to_string()]);
+    }
+
+    if let Some((first, rest)) = inside.split_once(',') {
+        let first = first.trim();
+        let rest_display = rest.trim();
+        let rest_index = normalize_ascii_comma_spacing(rest_display);
+        if !first.is_empty() && !rest_display.is_empty() {
+            let display = format!("{left}（{first}, {rest_display}）");
+            return (
+                display,
+                vec![left.to_string(), first.to_string(), rest_index],
+            );
+        }
+    }
+
+    let display = format!("{left}（{inside}）");
+    (display, vec![left.to_string(), inside.to_string()])
+}
+
+fn split_last_fullwidth_parenthesized(text: &str) -> Option<(&str, &str)> {
+    let prefix = text.strip_suffix('）')?;
+    let open = prefix.rfind('（')?;
+    let inside = &prefix[open + '（'.len_utf8()..];
+    Some((&prefix[..open], inside))
+}
+
+fn normalize_ascii_comma_spacing(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != ',' {
+            out.push(ch);
+            continue;
+        }
+
+        out.push(',');
+        while matches!(chars.peek(), Some(next) if next.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek().is_some() {
+            out.push(' ');
+        }
+    }
+    out
+}
+
 fn render_display_math(literal: &str, trailing_space_sentinel: char) -> String {
     let literal = restore_trailing_space_sentinel(literal, trailing_space_sentinel);
     let literal = literal.strip_prefix('\n').unwrap_or(&literal);
@@ -1369,39 +1741,73 @@ fn escape_latex_href_url(url: &str) -> String {
     out
 }
 
-fn render_html_block(
+fn render_html_block<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
     html: &comrak::nodes::NodeHtmlBlock,
     indent: usize,
     preprocessed: &PreprocessedMarkdown,
 ) -> Option<String> {
-    let images = parse_html_img_tags(&html.literal);
-    if !images.is_empty() {
-        let figures = images
-            .into_iter()
-            .map(|image| {
+    let elements = parse_html_block_elements(&html.literal);
+    if elements.is_empty() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    let mut image_index = 0usize;
+    let mut center_skip = consumed_center_count_for_node(node);
+    let mut index = 0usize;
+    while let Some(element) = elements.get(index) {
+        match element {
+            HtmlBlockElement::Image(image) => {
                 let include = render_includegraphics(
                     &image.src,
                     image.option,
                     preprocessed.trailing_space_sentinel,
                 );
-                render_figure(indent, &include)
-            })
-            .collect::<Vec<_>>();
-        return Some(figures.join("\n"));
+                let annotation = figure_annotation_for_node(node, image_index);
+                image_index += 1;
+                parts.push(render_figure(
+                    indent,
+                    &include,
+                    annotation.caption.as_deref(),
+                    annotation.label.as_deref(),
+                ));
+
+                if annotation.consume_following_center
+                    && matches!(elements.get(index + 1), Some(HtmlBlockElement::Center(_)))
+                {
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            HtmlBlockElement::Center(content) => {
+                if center_skip > 0 {
+                    center_skip -= 1;
+                    index += 1;
+                    continue;
+                }
+                parts.push(render_center(indent, content));
+                index += 1;
+            }
+            HtmlBlockElement::Text(text) => {
+                let rendered = render_inline_fragment(text);
+                if !rendered.trim().is_empty() {
+                    parts.push(indent_multiline(indent, rendered));
+                }
+                index += 1;
+            }
+        }
     }
 
-    let center_contents = parse_html_center_tags(&html.literal);
-    if !center_contents.is_empty() {
-        let centers = center_contents
-            .into_iter()
-            .map(|content| render_center(indent, &content))
-            .collect::<Vec<_>>();
-        return Some(centers.join("\n"));
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
     }
-
-    None
 }
 
+#[derive(Clone, Copy)]
 enum IncludeGraphicsOption {
     Scale(f64),
     WidthTextWidth(f64),
@@ -1437,7 +1843,12 @@ fn format_f64_trimmed_2(value: f64) -> String {
     out
 }
 
-fn render_figure(indent: usize, includegraphics: &str) -> String {
+fn render_figure(
+    indent: usize,
+    includegraphics: &str,
+    caption: Option<&str>,
+    label: Option<&str>,
+) -> String {
     let mut lines = Vec::new();
     if force_figure_strict_here() {
         lines.push(indent_line(indent, "\\begin{figure}[H]"));
@@ -1446,6 +1857,12 @@ fn render_figure(indent: usize, includegraphics: &str) -> String {
     }
     lines.push(indent_line(indent + 4, "\\centering"));
     lines.push(indent_line(indent + 4, includegraphics));
+    if let Some(caption) = caption.filter(|caption| !caption.is_empty()) {
+        lines.push(indent_line(indent + 4, format!("\\caption{{{caption}}}")));
+    }
+    if let Some(label) = label {
+        lines.push(indent_line(indent + 4, format!("\\label{{{label}}}")));
+    }
     lines.push(indent_line(indent, "\\end{figure}"));
     lines.join("\n")
 }
@@ -1464,6 +1881,12 @@ struct HtmlImage {
     option: Option<IncludeGraphicsOption>,
 }
 
+enum HtmlBlockElement {
+    Image(HtmlImage),
+    Center(String),
+    Text(String),
+}
+
 fn parse_html_img_tag(html: &str) -> Option<HtmlImage> {
     let html = html.trim();
     if !html.starts_with("<img") {
@@ -1475,29 +1898,6 @@ fn parse_html_img_tag(html: &str) -> Option<HtmlImage> {
         extract_html_attr_value(html, "style").and_then(|style| parse_html_img_option(&style));
 
     Some(HtmlImage { src, option })
-}
-
-fn parse_html_img_tags(html: &str) -> Vec<HtmlImage> {
-    let html = html.trim();
-    if !html.starts_with("<img") {
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    let mut offset = 0;
-    while let Some(start) = html[offset..].find("<img") {
-        let start = offset + start;
-        let Some(end) = html[start..].find('>') else {
-            break;
-        };
-        let end = start + end + 1;
-        if let Some(image) = parse_html_img_tag(&html[start..end]) {
-            out.push(image);
-        }
-        offset = end;
-    }
-
-    out
 }
 
 fn parse_html_center_tag(html: &str) -> Option<String> {
@@ -1529,6 +1929,123 @@ fn parse_html_center_tags(html: &str) -> Vec<String> {
     }
 
     out
+}
+
+fn parse_html_block_elements(html: &str) -> Vec<HtmlBlockElement> {
+    let mut rest = html.trim();
+    let mut out = Vec::new();
+
+    while !rest.is_empty() {
+        if rest.starts_with("<img") {
+            if let Some(end) = rest.find('>') {
+                let tag = &rest[..=end];
+                if let Some(image) = parse_html_img_tag(tag) {
+                    out.push(HtmlBlockElement::Image(image));
+                    rest = rest[end + 1..].trim_start();
+                    continue;
+                }
+            }
+        }
+
+        if let Some(after_open) = rest.strip_prefix("<center>")
+            && let Some(close_index) = after_open.find("</center>")
+        {
+            out.push(HtmlBlockElement::Center(
+                after_open[..close_index].trim().to_string(),
+            ));
+            rest = after_open[close_index + "</center>".len()..].trim_start();
+            continue;
+        }
+
+        let next_img = rest.find("<img");
+        let next_center = rest.find("<center>");
+        let next_tag = match (next_img, next_center) {
+            (Some(img), Some(center)) => Some(img.min(center)),
+            (Some(img), None) => Some(img),
+            (None, Some(center)) => Some(center),
+            (None, None) => None,
+        };
+        let (text, next_rest) = match next_tag {
+            Some(index) => (&rest[..index], &rest[index..]),
+            None => (rest, ""),
+        };
+        push_text_as_html_elements(text, &mut out);
+        rest = next_rest.trim_start();
+    }
+
+    out
+}
+
+fn push_text_as_html_elements(text: &str, out: &mut Vec<HtmlBlockElement>) {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(url) = parse_markdown_image_url(line) {
+            out.push(HtmlBlockElement::Image(HtmlImage {
+                src: url,
+                option: None,
+            }));
+        } else {
+            out.push(HtmlBlockElement::Text(line.to_string()));
+        }
+    }
+}
+
+fn parse_markdown_image_url(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("![")?;
+    let (_, destination) = rest.split_once("](")?;
+    let url = destination.strip_suffix(')')?;
+    Some(url.to_string())
+}
+
+struct FigureCaption {
+    caption: Option<String>,
+    token: Option<String>,
+}
+
+fn parse_figure_caption(content: &str) -> FigureCaption {
+    let content = content.trim();
+    if content.is_empty() {
+        return FigureCaption {
+            caption: None,
+            token: None,
+        };
+    }
+
+    let Some(after_prefix) = content.strip_prefix('图') else {
+        return FigureCaption {
+            caption: Some(content.to_string()),
+            token: None,
+        };
+    };
+    if !(after_prefix.starts_with(':') || starts_with_whitespace(after_prefix)) {
+        return FigureCaption {
+            caption: Some(content.to_string()),
+            token: None,
+        };
+    }
+
+    let rest = after_prefix.trim_start();
+    if let Some((token, title)) = rest.split_once(':') {
+        let token = token.trim();
+        let title = title.trim();
+        return FigureCaption {
+            caption: (!title.is_empty()).then(|| title.to_string()),
+            token: (!token.is_empty()).then(|| token.to_string()),
+        };
+    }
+
+    let token = rest.trim();
+    FigureCaption {
+        caption: None,
+        token: (!token.is_empty()).then(|| token.to_string()),
+    }
+}
+
+fn starts_with_whitespace(text: &str) -> bool {
+    text.chars().next().is_some_and(char::is_whitespace)
 }
 
 fn extract_html_attr_value(html: &str, attr: &str) -> Option<String> {

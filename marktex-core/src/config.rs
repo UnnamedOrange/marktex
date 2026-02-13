@@ -10,6 +10,8 @@ use serde::Deserialize;
 pub struct Options {
     pub force_figure_strict_here: bool,
     pub enable_heading_xref: bool,
+    pub enable_center_as_figure_caption: bool,
+    pub enable_advanced_xref: bool,
 }
 
 pub fn load_options_from_yaml_file(path: &Path) -> crate::Result<Options> {

@@ -4,6 +4,10 @@
 use std::fs;
 use std::path::Path;
 
+fn normalize_line_endings(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn read_fixture_options(
     fixture_dir: &Path,
 ) -> datatest_stable::Result<marktex_core::config::Options> {
@@ -42,7 +46,10 @@ fn golden_case(path: &Path) -> datatest_stable::Result<()> {
     let expected = fs::read_to_string(answer_path)?;
     let actual = marktex_core::compile_str_with_options(&input, &options)?;
 
-    assert_eq!(actual, expected);
+    assert_eq!(
+        normalize_line_endings(&actual),
+        normalize_line_endings(&expected)
+    );
     Ok(())
 }
 

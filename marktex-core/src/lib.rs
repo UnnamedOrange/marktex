@@ -2291,11 +2291,7 @@ fn render_item<'a>(
             lines.extend(nested.split('\n').map(|l| l.to_string()));
         }
         _ => {
-            let block_indent = if aligns_with_item_indent(first) {
-                indent
-            } else {
-                indent + 4
-            };
+            let block_indent = item_block_indent(first, indent, preprocessed);
             if let Some(block) = render_block(first, block_indent, preprocessed) {
                 lines.push(indent_line(indent, "\\item"));
                 lines.extend(block.split('\n').map(|l| l.to_string()));
@@ -2323,11 +2319,7 @@ fn render_item<'a>(
                 if !parent_tight {
                     lines.push(String::new());
                 }
-                let block_indent = if aligns_with_item_indent(block) {
-                    indent
-                } else {
-                    indent + 4
-                };
+                let block_indent = item_block_indent(block, indent, preprocessed);
                 if let Some(rendered) = render_block(block, block_indent, preprocessed) {
                     lines.extend(rendered.split('\n').map(|l| l.to_string()));
                 }
@@ -2338,13 +2330,21 @@ fn render_item<'a>(
     lines
 }
 
-fn aligns_with_item_indent<'a>(node: &'a comrak::nodes::AstNode<'a>) -> bool {
-    matches!(
-        &node.data.borrow().value,
-        comrak::nodes::NodeValue::Alert(_)
-            | comrak::nodes::NodeValue::BlockQuote
-            | comrak::nodes::NodeValue::List(_)
-    )
+fn item_block_indent<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    item_indent: usize,
+    preprocessed: &PreprocessedMarkdown,
+) -> usize {
+    match &node.data.borrow().value {
+        comrak::nodes::NodeValue::Paragraph => {
+            if figure_include_for_paragraph(node, preprocessed).is_some() {
+                item_indent
+            } else {
+                item_indent + 4
+            }
+        }
+        _ => item_indent,
+    }
 }
 
 fn render_item_paragraph(indent: usize, content: &str) -> Vec<String> {

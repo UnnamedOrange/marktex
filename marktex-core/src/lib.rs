@@ -1390,8 +1390,13 @@ fn render_html_block(
         return Some(figures.join("\n"));
     }
 
-    if let Some(content) = parse_html_center_tag(&html.literal) {
-        return Some(render_center(indent, &content));
+    let center_contents = parse_html_center_tags(&html.literal);
+    if !center_contents.is_empty() {
+        let centers = center_contents
+            .into_iter()
+            .map(|content| render_center(indent, &content))
+            .collect::<Vec<_>>();
+        return Some(centers.join("\n"));
     }
 
     None
@@ -1496,9 +1501,34 @@ fn parse_html_img_tags(html: &str) -> Vec<HtmlImage> {
 }
 
 fn parse_html_center_tag(html: &str) -> Option<String> {
-    let html = html.trim();
-    let content = html.strip_prefix("<center>")?.strip_suffix("</center>")?;
-    Some(content.trim().to_string())
+    let mut centers = parse_html_center_tags(html);
+    if centers.len() == 1 {
+        return centers.pop();
+    }
+    None
+}
+
+fn parse_html_center_tags(html: &str) -> Vec<String> {
+    let mut rest = html.trim();
+    if rest.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let Some(after_open) = rest.strip_prefix("<center>") else {
+            return Vec::new();
+        };
+        let Some(close_index) = after_open.find("</center>") else {
+            return Vec::new();
+        };
+        out.push(after_open[..close_index].trim().to_string());
+
+        rest = &after_open[close_index + "</center>".len()..];
+        rest = rest.trim_start();
+    }
+
+    out
 }
 
 fn extract_html_attr_value(html: &str, attr: &str) -> Option<String> {

@@ -15,6 +15,7 @@ pub use config::Options;
 pub struct Context {
     next_heading_label: usize,
     next_figure_label: usize,
+    next_relative_figure_label: usize,
 }
 
 impl Default for Context {
@@ -22,6 +23,7 @@ impl Default for Context {
         Self {
             next_heading_label: 1,
             next_figure_label: 1,
+            next_relative_figure_label: 1,
         }
     }
 }
@@ -74,11 +76,22 @@ fn compile_one_with_options_and_context(
     if let Some(index) = heading_index.as_ref() {
         context.next_heading_label += index.generated_count();
     }
-    let figure_index = options
-        .enable_center_as_figure_caption
-        .then(|| FigureIndex::new(root, &preprocessed, context.next_figure_label));
+    let figure_relative_xref_enabled =
+        options.enable_advanced_xref && options.enable_figure_relative_xref;
+    let figure_index = (options.enable_center_as_figure_caption || figure_relative_xref_enabled)
+        .then(|| {
+            FigureIndex::new(
+                root,
+                &preprocessed,
+                context.next_figure_label,
+                context.next_relative_figure_label,
+                options.enable_center_as_figure_caption,
+                figure_relative_xref_enabled,
+            )
+        });
     if let Some(index) = figure_index.as_ref() {
-        context.next_figure_label += index.generated_count();
+        context.next_figure_label += index.generated_figure_count();
+        context.next_relative_figure_label += index.generated_relative_figure_count();
     }
     let _runtime_guard = RenderRuntimeGuard::new(RenderRuntime {
         options: options.clone(),
@@ -197,90 +210,147 @@ impl HeadingIndex {
 struct FigureAnnotation {
     caption: Option<String>,
     label: Option<String>,
+    relative_label: Option<String>,
+    ensure_caption: bool,
     consume_following_center: bool,
 }
 
-struct FigureEntry {
+struct TokenFigureEntry {
     token: String,
     line: usize,
     label: String,
 }
 
-struct FigureIndex {
-    entries: Vec<FigureEntry>,
-    annotations_by_node: HashMap<usize, Vec<FigureAnnotation>>,
-    consumed_center_count_by_node: HashMap<usize, usize>,
+struct RelativeFigureEntry {
+    line: usize,
+    label: String,
 }
 
-impl FigureIndex {
-    fn new<'a>(
-        root: &'a comrak::nodes::AstNode<'a>,
-        preprocessed: &PreprocessedMarkdown,
-        next_figure_label: usize,
-    ) -> Self {
-        let top_level_nodes = root.children().collect::<Vec<_>>();
-        let mut entries = Vec::new();
-        let mut annotations_by_node = HashMap::new();
-        let mut consumed_center_count_by_node = HashMap::new();
-        let mut next_figure_label = next_figure_label;
+enum RelativeFigureDirection {
+    Above,
+    Below,
+}
 
-        let mut apply_caption = |annotation: &mut FigureAnnotation, content: &str, line: usize| {
-            annotation.consume_following_center = true;
-            let caption = parse_figure_caption(content);
-            annotation.caption = caption.caption;
-            if let Some(token) = caption.token {
-                let label = format!("fig:{next_figure_label:04}");
-                next_figure_label += 1;
-                entries.push(FigureEntry {
-                    token,
-                    line,
-                    label: label.clone(),
-                });
-                annotation.label = Some(label);
+struct FigureIndex {
+    token_entries: Vec<TokenFigureEntry>,
+    relative_entries: Vec<RelativeFigureEntry>,
+    annotations_by_node: HashMap<usize, Vec<FigureAnnotation>>,
+    consumed_center_count_by_node: HashMap<usize, usize>,
+    generated_figure_count: usize,
+    generated_relative_figure_count: usize,
+}
+
+struct FigureIndexBuildState {
+    token_entries: Vec<TokenFigureEntry>,
+    relative_entries: Vec<RelativeFigureEntry>,
+    annotations_by_node: HashMap<usize, Vec<FigureAnnotation>>,
+    consumed_center_count_by_node: HashMap<usize, usize>,
+    next_figure_label: usize,
+    next_relative_figure_label: usize,
+    enable_center_as_figure_caption: bool,
+    enable_figure_relative_xref: bool,
+}
+
+impl FigureIndexBuildState {
+    fn apply_center_caption(
+        &mut self,
+        annotation: &mut FigureAnnotation,
+        content: &str,
+        line: usize,
+    ) {
+        if !self.enable_center_as_figure_caption {
+            return;
+        }
+
+        annotation.consume_following_center = true;
+        let caption = parse_figure_caption(content);
+        annotation.caption = caption.caption;
+        if let Some(token) = caption.token {
+            let label = format!("fig:{:04}", self.next_figure_label);
+            self.next_figure_label += 1;
+            self.token_entries.push(TokenFigureEntry {
+                token,
+                line,
+                label: label.clone(),
+            });
+            annotation.label = Some(label);
+        }
+    }
+
+    fn apply_relative_label(&mut self, annotation: &mut FigureAnnotation, line: usize) {
+        if !self.enable_figure_relative_xref {
+            return;
+        }
+
+        if annotation.relative_label.is_none() {
+            let label = format!("relfig:{:04}", self.next_relative_figure_label);
+            self.next_relative_figure_label += 1;
+            annotation.relative_label = Some(label);
+            if annotation.label.is_none() {
+                annotation.ensure_caption = annotation.caption.is_none();
             }
-        };
+        }
 
-        for (index, node) in top_level_nodes.iter().copied().enumerate() {
-            let node_line = node_source_line(node);
-            match &node.data.borrow().value {
-                comrak::nodes::NodeValue::Paragraph => {
-                    if figure_include_for_paragraph(node, preprocessed).is_none() {
+        if let Some(label) = annotation.relative_label.as_ref() {
+            self.relative_entries.push(RelativeFigureEntry {
+                line,
+                label: label.clone(),
+            });
+        }
+    }
+}
+
+fn collect_figure_annotations<'a>(
+    parent: &'a comrak::nodes::AstNode<'a>,
+    preprocessed: &PreprocessedMarkdown,
+    state: &mut FigureIndexBuildState,
+) {
+    let siblings = parent.children().collect::<Vec<_>>();
+    for (index, node) in siblings.iter().copied().enumerate() {
+        let node_line = node_source_line(node);
+        match &node.data.borrow().value {
+            comrak::nodes::NodeValue::Paragraph => {
+                if figure_include_for_paragraph(node, preprocessed).is_none() {
+                    continue;
+                }
+
+                let mut annotation = FigureAnnotation::default();
+                if let Some(next) = siblings.get(index + 1).copied()
+                    && let comrak::nodes::NodeValue::HtmlBlock(html) = &next.data.borrow().value
+                    && state.enable_center_as_figure_caption
+                {
+                    let first_center = parse_html_center_tags(&html.literal)
+                        .first()
+                        .cloned()
+                        .or_else(|| match parse_html_block_elements(&html.literal).first() {
+                            Some(HtmlBlockElement::Center(center)) => Some(center.clone()),
+                            _ => None,
+                        });
+                    if let Some(first_center) = first_center {
+                        state.apply_center_caption(&mut annotation, &first_center, node_line);
+                        state.consumed_center_count_by_node.insert(node_id(next), 1);
+                    }
+                }
+                state.apply_relative_label(&mut annotation, node_line);
+                state
+                    .annotations_by_node
+                    .insert(node_id(node), vec![annotation]);
+            }
+            comrak::nodes::NodeValue::HtmlBlock(html) => {
+                let elements = parse_html_block_elements(&html.literal);
+                let mut annotations = Vec::new();
+                for (elem_index, element) in elements.iter().enumerate() {
+                    if !matches!(element, HtmlBlockElement::Image(_)) {
                         continue;
                     }
 
                     let mut annotation = FigureAnnotation::default();
-                    if let Some(next) = top_level_nodes.get(index + 1).copied()
-                        && let comrak::nodes::NodeValue::HtmlBlock(html) = &next.data.borrow().value
-                    {
-                        let first_center = parse_html_center_tags(&html.literal)
-                            .first()
-                            .cloned()
-                            .or_else(|| match parse_html_block_elements(&html.literal).first() {
-                                Some(HtmlBlockElement::Center(center)) => Some(center.clone()),
-                                _ => None,
-                            });
-                        if let Some(first_center) = first_center {
-                            apply_caption(&mut annotation, &first_center, node_line);
-                            consumed_center_count_by_node.insert(node_id(next), 1);
-                        }
-                    }
-
-                    annotations_by_node.insert(node_id(node), vec![annotation]);
-                }
-                comrak::nodes::NodeValue::HtmlBlock(html) => {
-                    let elements = parse_html_block_elements(&html.literal);
-                    let mut annotations = Vec::new();
-                    for (elem_index, element) in elements.iter().enumerate() {
-                        if !matches!(element, HtmlBlockElement::Image(_)) {
-                            continue;
-                        }
-
-                        let mut annotation = FigureAnnotation::default();
+                    if state.enable_center_as_figure_caption {
                         if let Some(HtmlBlockElement::Center(center)) = elements.get(elem_index + 1)
                         {
-                            apply_caption(&mut annotation, center, node_line);
+                            state.apply_center_caption(&mut annotation, center, node_line);
                         } else if elem_index + 1 == elements.len()
-                            && let Some(next) = top_level_nodes.get(index + 1).copied()
+                            && let Some(next) = siblings.get(index + 1).copied()
                             && let comrak::nodes::NodeValue::HtmlBlock(next_html) =
                                 &next.data.borrow().value
                         {
@@ -296,30 +366,73 @@ impl FigureIndex {
                                     }
                                 });
                             if let Some(first_center) = first_center {
-                                apply_caption(&mut annotation, &first_center, node_line);
-                                consumed_center_count_by_node.insert(node_id(next), 1);
+                                state.apply_center_caption(
+                                    &mut annotation,
+                                    &first_center,
+                                    node_line,
+                                );
+                                state.consumed_center_count_by_node.insert(node_id(next), 1);
                             }
                         }
-                        annotations.push(annotation);
                     }
-
-                    if !annotations.is_empty() {
-                        annotations_by_node.insert(node_id(node), annotations);
-                    }
+                    state.apply_relative_label(&mut annotation, node_line);
+                    annotations.push(annotation);
                 }
-                _ => {}
-            }
-        }
 
-        Self {
-            entries,
-            annotations_by_node,
-            consumed_center_count_by_node,
+                if !annotations.is_empty() {
+                    state.annotations_by_node.insert(node_id(node), annotations);
+                }
+            }
+            _ => {}
         }
     }
 
-    fn generated_count(&self) -> usize {
-        self.entries.len()
+    for child in siblings {
+        collect_figure_annotations(child, preprocessed, state);
+    }
+}
+
+impl FigureIndex {
+    fn new<'a>(
+        root: &'a comrak::nodes::AstNode<'a>,
+        preprocessed: &PreprocessedMarkdown,
+        next_figure_label: usize,
+        next_relative_figure_label: usize,
+        enable_center_as_figure_caption: bool,
+        enable_figure_relative_xref: bool,
+    ) -> Self {
+        let start_figure_label = next_figure_label;
+        let start_relative_figure_label = next_relative_figure_label;
+
+        let mut state = FigureIndexBuildState {
+            token_entries: Vec::new(),
+            relative_entries: Vec::new(),
+            annotations_by_node: HashMap::new(),
+            consumed_center_count_by_node: HashMap::new(),
+            next_figure_label,
+            next_relative_figure_label,
+            enable_center_as_figure_caption,
+            enable_figure_relative_xref,
+        };
+        collect_figure_annotations(root, preprocessed, &mut state);
+
+        Self {
+            token_entries: state.token_entries,
+            relative_entries: state.relative_entries,
+            annotations_by_node: state.annotations_by_node,
+            consumed_center_count_by_node: state.consumed_center_count_by_node,
+            generated_figure_count: state.next_figure_label - start_figure_label,
+            generated_relative_figure_count: state.next_relative_figure_label
+                - start_relative_figure_label,
+        }
+    }
+
+    fn generated_figure_count(&self) -> usize {
+        self.generated_figure_count
+    }
+
+    fn generated_relative_figure_count(&self) -> usize {
+        self.generated_relative_figure_count
     }
 
     fn annotation_for_node<'a>(
@@ -344,7 +457,11 @@ impl FigureIndex {
     fn resolve_label(&self, target: &str, current_line: usize) -> Option<&str> {
         let mut nearest_above = None;
         let mut first_below = None;
-        for entry in self.entries.iter().filter(|entry| entry.token == target) {
+        for entry in self
+            .token_entries
+            .iter()
+            .filter(|entry| entry.token == target)
+        {
             if entry.line <= current_line {
                 nearest_above = Some(entry);
             } else if first_below.is_none() {
@@ -354,6 +471,26 @@ impl FigureIndex {
         nearest_above
             .or(first_below)
             .map(|entry| entry.label.as_str())
+    }
+
+    fn resolve_relative_label(
+        &self,
+        direction: RelativeFigureDirection,
+        current_line: usize,
+    ) -> Option<&str> {
+        match direction {
+            RelativeFigureDirection::Above => self
+                .relative_entries
+                .iter()
+                .rev()
+                .find(|entry| entry.line < current_line)
+                .map(|entry| entry.label.as_str()),
+            RelativeFigureDirection::Below => self
+                .relative_entries
+                .iter()
+                .find(|entry| entry.line > current_line)
+                .map(|entry| entry.label.as_str()),
+        }
     }
 }
 
@@ -490,6 +627,14 @@ fn advanced_xref_enabled() -> bool {
     with_runtime(|runtime| runtime.is_some_and(|runtime| runtime.options.enable_advanced_xref))
 }
 
+fn figure_relative_xref_enabled() -> bool {
+    with_runtime(|runtime| {
+        runtime.is_some_and(|runtime| {
+            runtime.options.enable_advanced_xref && runtime.options.enable_figure_relative_xref
+        })
+    })
+}
+
 fn heading_label_for_node<'a>(node: &'a comrak::nodes::AstNode<'a>) -> Option<String> {
     with_runtime(|runtime| {
         runtime
@@ -516,6 +661,21 @@ fn resolve_figure_label(token: &str, source_line: usize) -> Option<String> {
         runtime
             .and_then(|runtime| runtime.figure_index.as_ref())
             .and_then(|index| index.resolve_label(token, source_line))
+            .map(str::to_string)
+    })
+}
+
+fn resolve_relative_figure_label(
+    direction: RelativeFigureDirection,
+    source_line: usize,
+) -> Option<String> {
+    with_runtime(|runtime| {
+        runtime
+            .filter(|runtime| {
+                runtime.options.enable_advanced_xref && runtime.options.enable_figure_relative_xref
+            })
+            .and_then(|runtime| runtime.figure_index.as_ref())
+            .and_then(|index| index.resolve_relative_label(direction, source_line))
             .map(str::to_string)
     })
 }
@@ -623,6 +783,8 @@ fn render_paragraph_as_figure<'a>(
         &include,
         annotation.caption.as_deref(),
         annotation.label.as_deref(),
+        annotation.relative_label.as_deref(),
+        annotation.ensure_caption,
     ))
 }
 
@@ -698,11 +860,13 @@ fn render_inlines_with_references<'a>(
             }
             comrak::nodes::NodeValue::Image(image) => {
                 flush_pending_cites(&mut out, &mut pending_cites);
-                out.push_str(&render_includegraphics(
-                    &image.url,
-                    None,
-                    preprocessed.trailing_space_sentinel,
-                ));
+                let include =
+                    render_includegraphics(&image.url, None, preprocessed.trailing_space_sentinel);
+                if children.len() > 1 && inline_node_is_standalone_line(&children, index) {
+                    out.push_str(&render_figure(0, &include, None, None, None, false));
+                } else {
+                    out.push_str(&include);
+                }
             }
             comrak::nodes::NodeValue::HtmlInline(html) => {
                 flush_pending_cites(&mut out, &mut pending_cites);
@@ -713,7 +877,7 @@ fn render_inlines_with_references<'a>(
                         preprocessed.trailing_space_sentinel,
                     );
                     if inline_node_is_standalone_line(&children, index) {
-                        out.push_str(&render_figure(0, &include, None, None));
+                        out.push_str(&render_figure(0, &include, None, None, None, false));
                     } else {
                         out.push_str(&include);
                     }
@@ -1490,6 +1654,15 @@ fn render_advanced_emph<'a>(
         return Some(String::from("\\emph{}"));
     }
 
+    if figure_relative_xref_enabled()
+        && let Some(direction) = parse_relative_figure_reference(text)
+    {
+        if let Some(label) = resolve_relative_figure_label(direction, node_source_line(node)) {
+            return Some(format!("图 \\ref{{{label}}}"));
+        }
+        return None;
+    }
+
     if let Some(token) = parse_figure_reference_token(text) {
         if let Some(label) = resolve_figure_label(token, node_source_line(node)) {
             return Some(format!("图 \\ref{{{label}}}"));
@@ -1569,6 +1742,14 @@ fn parse_figure_reference_token(text: &str) -> Option<&str> {
     }
     let token = rest.trim();
     (!token.is_empty()).then_some(token)
+}
+
+fn parse_relative_figure_reference(text: &str) -> Option<RelativeFigureDirection> {
+    match text.trim() {
+        "上图" => Some(RelativeFigureDirection::Above),
+        "下图" => Some(RelativeFigureDirection::Below),
+        _ => None,
+    }
 }
 
 fn parse_index_entries(text: &str) -> (String, Vec<String>) {
@@ -1855,6 +2036,8 @@ fn render_html_block<'a>(
                     &include,
                     annotation.caption.as_deref(),
                     annotation.label.as_deref(),
+                    annotation.relative_label.as_deref(),
+                    annotation.ensure_caption,
                 ));
 
                 if annotation.consume_following_center
@@ -1932,6 +2115,8 @@ fn render_figure(
     includegraphics: &str,
     caption: Option<&str>,
     label: Option<&str>,
+    relative_label: Option<&str>,
+    ensure_caption: bool,
 ) -> String {
     let mut lines = Vec::new();
     if force_figure_strict_here() {
@@ -1941,11 +2126,19 @@ fn render_figure(
     }
     lines.push(indent_line(indent + 4, "\\centering"));
     lines.push(indent_line(indent + 4, includegraphics));
-    if let Some(caption) = caption.filter(|caption| !caption.is_empty()) {
+    if let Some(caption) = caption {
         lines.push(indent_line(indent + 4, format!("\\caption{{{caption}}}")));
+    } else if ensure_caption {
+        lines.push(indent_line(indent + 4, "\\caption{}"));
     }
     if let Some(label) = label {
         lines.push(indent_line(indent + 4, format!("\\label{{{label}}}")));
+    }
+    if let Some(relative_label) = relative_label {
+        lines.push(indent_line(
+            indent + 4,
+            format!("\\label{{{relative_label}}}"),
+        ));
     }
     lines.push(indent_line(indent, "\\end{figure}"));
     lines.join("\n")

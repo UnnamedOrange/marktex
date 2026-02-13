@@ -1,0 +1,40 @@
+\begin{figure}
+    \centering
+    \includegraphics{assets/1.jpg}
+    \caption{引用用例}
+    \label{fig:0001}
+\end{figure}
+
+如图 \ref{fig:0001} 所示，这是一个引用的示例。
+
+图 \ref{fig:0002} 表明，也可以引用后面的。
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/2.jpg}
+    \caption{引用用例}
+    \label{fig:0002}
+\end{figure}
+
+图 \ref{fig:0002} 表明，有重复的话，引用往前最接近它的那个，往前没有就往后。
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/2.jpg}
+    \caption{重复图片}
+    \label{fig:0003}
+\end{figure}
+
+图 \ref{fig:0003} 表明，有重复的话，引用往前最接近它的那个，往前没有就往后。
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/3.jpg}
+    \caption{也可以用复杂一点的名字}
+    \label{fig:0004}
+\end{figure}
+可以用复杂一点的图 \ref{fig:0004}。
+
+要是没有匹配上，比如\emph{图 绝对没有出现过}，就原样输出。
+
+要是不对劲，比如\emph{图1}\index{图1}，则视为索引。

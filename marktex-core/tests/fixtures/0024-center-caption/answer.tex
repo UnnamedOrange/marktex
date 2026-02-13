@@ -1,0 +1,112 @@
+\begin{figure}
+    \centering
+    \includegraphics{assets/1.jpg}
+    \caption{图片的标题}
+\end{figure}
+
+\begin{center}
+    不算图片的标题
+\end{center}
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/2.jpg}
+    \caption{图片的标题}
+\end{figure}
+\begin{center}
+    不算图片的标题
+\end{center}
+
+一个内联图片 \includegraphics{assets/3.jpg}。
+\begin{center}
+    不算图片的标题
+\end{center}
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/4.jpg}
+    \caption{带有 label 的图片的标题}
+    \label{fig:0001}
+\end{figure}
+
+\begin{center}
+    something
+\end{center}
+
+\begin{figure}
+    \centering
+    \includegraphics{assets/5.jpg}
+    \caption{不要空格也可以}
+    \label{fig:0002}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[scale=0.33]{assets/6.jpg}
+    \caption{有多个前置空格也会被省略}
+    \label{fig:0003}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.33\textwidth]{assets/7.jpg}
+    \label{fig:0004}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\textwidth]{assets/8.jpg}
+    \caption{也就是说也可以不要标题}
+    \label{fig:0005}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics{a **!}
+\end{figure}
+something
+\begin{center}
+    Nope
+\end{center}
+
+\begin{figure}
+    \centering
+    \includegraphics{test\_image.jpg}
+    \caption{只要不是图开头:再拽的冒号也没用}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics{a **!}
+    \caption{冒号中间没东西，也认为标签是空的}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics{test\_image.jpg}
+    \caption{冒号前面有额外空格，原样算上应该最简单}
+    \label{fig:0006}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics{test\_image.jpg}
+    \caption{图1: 忘记打空格了，不允许！}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics{test\_image.jpg}
+    \caption{打了空格是空的，算识别出标签，但是标签为空，就不写了。}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics{test\_image.jpg}
+    \caption{前面打了好几个空格，忽视它。}
+    \label{fig:0007}
+\end{figure}
+\begin{figure}
+    \centering
+    \includegraphics{test\_image.jpg}
+    \label{fig:0008}
+\end{figure}

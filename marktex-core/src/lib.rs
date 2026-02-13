@@ -898,10 +898,7 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
 
     let mut lines = markdown.split_inclusive('\n').peekable();
     while let Some(line) = lines.next() {
-        let (content, newline) = match line.strip_suffix('\n') {
-            Some(content) => (content, "\n"),
-            None => (line, ""),
-        };
+        let (content, newline) = split_content_and_newline(line);
 
         if let Some((name, definition)) = parse_footnote_definition_line(content) {
             footnotes.insert(name, definition);
@@ -914,7 +911,7 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
         if content == "$$" {
             let mut literal = String::new();
             for next in lines.by_ref() {
-                let next_content = next.strip_suffix('\n').unwrap_or(next);
+                let (next_content, _) = split_content_and_newline(next);
                 if next_content == "$$" {
                     break;
                 }
@@ -948,6 +945,13 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
         footnotes,
         math_block_placeholder_prefix,
         trailing_space_sentinel,
+    }
+}
+
+fn split_content_and_newline(line: &str) -> (&str, &str) {
+    match line.strip_suffix('\n') {
+        Some(content) => (content.strip_suffix('\r').unwrap_or(content), "\n"),
+        None => (line.strip_suffix('\r').unwrap_or(line), ""),
     }
 }
 

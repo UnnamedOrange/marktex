@@ -8,6 +8,10 @@ use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::NamedTempFile;
 
+fn normalize_line_endings(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn read_expected_tex(fixture_dir: &Path) -> datatest_stable::Result<String> {
     let mut tex_files = fixture_dir
         .read_dir()?
@@ -36,7 +40,7 @@ fn append_optional_config_arg(cmd: &mut Command, fixture_dir: &Path) {
 fn golden_cli_case(path: &Path) -> datatest_stable::Result<()> {
     let fixture_dir = path
         .parent()
-        .ok_or_else(|| "fixture input path should have a parent directory")?;
+        .ok_or("fixture input path should have a parent directory")?;
     let expected = read_expected_tex(fixture_dir)?;
 
     let output = NamedTempFile::new()?;
@@ -46,15 +50,20 @@ fn golden_cli_case(path: &Path) -> datatest_stable::Result<()> {
     compile_to_file_cmd.arg(path).assert().success();
 
     let actual = fs::read_to_string(output.path())?;
-    assert_eq!(actual, expected);
+    assert_eq!(
+        normalize_line_endings(&actual),
+        normalize_line_endings(&expected)
+    );
 
     let mut compile_to_stdout_cmd = cargo_bin_cmd!("marktex");
     append_optional_config_arg(&mut compile_to_stdout_cmd, fixture_dir);
-    compile_to_stdout_cmd
-        .arg(path)
-        .assert()
-        .success()
-        .stdout(expected);
+    let stdout_output = compile_to_stdout_cmd.arg(path).output()?;
+    assert!(stdout_output.status.success());
+    let stdout = String::from_utf8(stdout_output.stdout)?;
+    assert_eq!(
+        normalize_line_endings(&stdout),
+        normalize_line_endings(&expected)
+    );
     Ok(())
 }
 

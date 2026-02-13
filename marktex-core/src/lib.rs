@@ -482,88 +482,67 @@ fn render_inlines_with_references<'a>(
                     // valid LaTeX while being careful not to treat literal dollars (e.g. `\\$`)
                     // as delimiters.
                     if opens_latex_command_group(&math.literal) {
-                        if let Some(next) = children.get(index + 1) {
-                            if let comrak::nodes::NodeValue::Text(text) = &next.data.borrow().value
-                            {
-                                if let Some((inner, outer, suffix)) =
-                                    split_at_last_two_unescaped_dollars(text)
-                                {
-                                    out.push('$');
-                                    out.push_str(&restore_trailing_space_sentinel(
-                                        &math.literal,
-                                        preprocessed.trailing_space_sentinel,
-                                    ));
-                                    out.push('$');
-                                    push_raw_text(
-                                        &mut out,
-                                        inner,
-                                        preprocessed.trailing_space_sentinel,
-                                    );
-                                    out.push('$');
-                                    push_raw_text(
-                                        &mut out,
-                                        outer,
-                                        preprocessed.trailing_space_sentinel,
-                                    );
-                                    out.push('$');
-                                    if !suffix.is_empty() {
-                                        render_text_with_references(
-                                            &mut out,
-                                            suffix,
-                                            preprocessed,
-                                            allow_footnotes,
-                                            &mut pending_cites,
-                                        );
-                                    }
-                                    index += 2;
-                                    continue;
-                                }
+                        if let Some(next) = children.get(index + 1)
+                            && let comrak::nodes::NodeValue::Text(text) = &next.data.borrow().value
+                            && let Some((inner, outer, suffix)) =
+                                split_at_last_two_unescaped_dollars(text)
+                        {
+                            out.push('$');
+                            out.push_str(&restore_trailing_space_sentinel(
+                                &math.literal,
+                                preprocessed.trailing_space_sentinel,
+                            ));
+                            out.push('$');
+                            push_raw_text(&mut out, inner, preprocessed.trailing_space_sentinel);
+                            out.push('$');
+                            push_raw_text(&mut out, outer, preprocessed.trailing_space_sentinel);
+                            out.push('$');
+                            if !suffix.is_empty() {
+                                render_text_with_references(
+                                    &mut out,
+                                    suffix,
+                                    preprocessed,
+                                    allow_footnotes,
+                                    &mut pending_cites,
+                                );
                             }
+                            index += 2;
+                            continue;
                         }
 
                         if let (Some(next), Some(next_next)) =
                             (children.get(index + 1), children.get(index + 2))
-                        {
-                            if let (
+                            && let (
                                 comrak::nodes::NodeValue::Math(inner),
                                 comrak::nodes::NodeValue::Text(text),
                             ) = (&next.data.borrow().value, &next_next.data.borrow().value)
-                            {
-                                if !inner.display_math {
-                                    if let Some((tail, suffix)) =
-                                        split_at_last_unescaped_dollar(text)
-                                    {
-                                        out.push('$');
-                                        out.push_str(&restore_trailing_space_sentinel(
-                                            &math.literal,
-                                            preprocessed.trailing_space_sentinel,
-                                        ));
-                                        out.push('$');
-                                        out.push_str(&restore_trailing_space_sentinel(
-                                            &inner.literal,
-                                            preprocessed.trailing_space_sentinel,
-                                        ));
-                                        out.push('$');
-                                        push_raw_text(
-                                            &mut out,
-                                            tail,
-                                            preprocessed.trailing_space_sentinel,
-                                        );
-                                        out.push('$');
-                                        if !suffix.is_empty() {
-                                            render_text_with_references(
-                                                &mut out,
-                                                suffix,
-                                                preprocessed,
-                                                allow_footnotes,
-                                                &mut pending_cites,
-                                            );
-                                        }
-                                        index += 3;
-                                        continue;
-                                    }
-                                }
+                            && !inner.display_math
+                            && let Some((tail, suffix)) = split_at_last_unescaped_dollar(text)
+                        {
+                            out.push('$');
+                            out.push_str(&restore_trailing_space_sentinel(
+                                &math.literal,
+                                preprocessed.trailing_space_sentinel,
+                            ));
+                            out.push('$');
+                            out.push_str(&restore_trailing_space_sentinel(
+                                &inner.literal,
+                                preprocessed.trailing_space_sentinel,
+                            ));
+                            out.push('$');
+                            push_raw_text(&mut out, tail, preprocessed.trailing_space_sentinel);
+                            out.push('$');
+                            if !suffix.is_empty() {
+                                render_text_with_references(
+                                    &mut out,
+                                    suffix,
+                                    preprocessed,
+                                    allow_footnotes,
+                                    &mut pending_cites,
+                                );
                             }
+                            index += 3;
+                            continue;
                         }
                     }
                     out.push('$');
@@ -632,7 +611,7 @@ fn split_at_last_two_unescaped_dollars(text: &str) -> Option<(&str, &str, &str)>
         match ch {
             '\\' => backslashes += 1,
             '$' => {
-                if backslashes % 2 == 0 {
+                if backslashes.is_multiple_of(2) {
                     penultimate = last;
                     last = Some(index);
                 }
@@ -657,7 +636,7 @@ fn split_at_last_unescaped_dollar(text: &str) -> Option<(&str, &str)> {
         match ch {
             '\\' => backslashes += 1,
             '$' => {
-                if backslashes % 2 == 0 {
+                if backslashes.is_multiple_of(2) {
                     last = Some(index);
                 }
                 backslashes = 0;
@@ -919,10 +898,7 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
 
     let mut lines = markdown.split_inclusive('\n').peekable();
     while let Some(line) = lines.next() {
-        let (content, newline) = match line.strip_suffix('\n') {
-            Some(content) => (content, "\n"),
-            None => (line, ""),
-        };
+        let (content, newline) = split_content_and_newline(line);
 
         if let Some((name, definition)) = parse_footnote_definition_line(content) {
             footnotes.insert(name, definition);
@@ -934,8 +910,8 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
 
         if content == "$$" {
             let mut literal = String::new();
-            while let Some(next) = lines.next() {
-                let next_content = next.strip_suffix('\n').unwrap_or(next);
+            for next in lines.by_ref() {
+                let (next_content, _) = split_content_and_newline(next);
                 if next_content == "$$" {
                     break;
                 }
@@ -969,6 +945,13 @@ fn preprocess_markdown(markdown: &str) -> PreprocessedMarkdown {
         footnotes,
         math_block_placeholder_prefix,
         trailing_space_sentinel,
+    }
+}
+
+fn split_content_and_newline(line: &str) -> (&str, &str) {
+    match line.strip_suffix('\n') {
+        Some(content) => (content.strip_suffix('\r').unwrap_or(content), "\n"),
+        None => (line.strip_suffix('\r').unwrap_or(line), ""),
     }
 }
 
@@ -1122,7 +1105,7 @@ fn find_unescaped_char(text: &str, start: usize, target: char) -> Option<usize> 
         match ch {
             '\\' => backslashes += 1,
             _ => {
-                if ch == target && backslashes % 2 == 0 {
+                if ch == target && backslashes.is_multiple_of(2) {
                     return Some(start + offset);
                 }
                 backslashes = 0;
@@ -1138,11 +1121,11 @@ fn find_link_destination_end(text: &str, start: usize) -> Option<usize> {
     for (offset, ch) in text[start..].char_indices() {
         match ch {
             '\\' => backslashes += 1,
-            '(' if backslashes % 2 == 0 => {
+            '(' if backslashes.is_multiple_of(2) => {
                 depth += 1;
                 backslashes = 0;
             }
-            ')' if backslashes % 2 == 0 => {
+            ')' if backslashes.is_multiple_of(2) => {
                 if depth == 0 {
                     return Some(start + offset);
                 }
@@ -1463,10 +1446,11 @@ fn render_figure(indent: usize, includegraphics: &str) -> String {
 }
 
 fn render_center(indent: usize, content: &str) -> String {
-    let mut lines = Vec::new();
-    lines.push(indent_line(indent, "\\begin{center}"));
-    lines.push(indent_line(indent + 4, content));
-    lines.push(indent_line(indent, "\\end{center}"));
+    let lines = [
+        indent_line(indent, "\\begin{center}"),
+        indent_line(indent + 4, content),
+        indent_line(indent, "\\end{center}"),
+    ];
     lines.join("\n")
 }
 

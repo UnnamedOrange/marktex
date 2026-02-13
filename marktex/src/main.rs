@@ -18,6 +18,14 @@ fn main() {
         std::process::exit(1);
     }
 
+    let options = match marktex::config::load_options(args.config.as_deref()) {
+        Ok(options) => options,
+        Err(err) => {
+            eprintln!("无效的配置文件: {err}");
+            std::process::exit(1);
+        }
+    };
+
     let mut out = String::new();
     for input in &args.inputs {
         match std::fs::read_to_string(input) {
@@ -29,7 +37,7 @@ fn main() {
         }
     }
 
-    let out = match marktex_core::compile_str(&out) {
+    let out = match marktex_core::compile_str_with_options(&out, &options) {
         Ok(output) => output,
         Err(err) => {
             eprintln!("无法编译输入文件: {err}");
@@ -54,15 +62,19 @@ fn main() {
 mod tests {
     use std::path::PathBuf;
 
-    use clap::error::ErrorKind;
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     // 行为：仅输入文件时能解析 inputs 且 output 为空。
     #[test]
     fn parse_inputs_only() {
         let args = crate::cli::CliArgs::try_parse_from(["marktex", "a.md", "b.md"]).unwrap();
-        assert_eq!(args.inputs, vec![PathBuf::from("a.md"), PathBuf::from("b.md")]);
+        assert_eq!(
+            args.inputs,
+            vec![PathBuf::from("a.md"), PathBuf::from("b.md")]
+        );
         assert_eq!(args.output, None);
+        assert_eq!(args.config, None);
     }
 
     // 行为：支持短参数 -o/--output，并且允许与 inputs 混排。
@@ -72,33 +84,28 @@ mod tests {
             crate::cli::CliArgs::try_parse_from(["marktex", "-o", "out.tex", "a.md"]).unwrap();
         assert_eq!(args.inputs, vec![PathBuf::from("a.md")]);
         assert_eq!(args.output, Some(PathBuf::from("out.tex")));
+        assert_eq!(args.config, None);
     }
 
     // 行为：支持长参数 --output，并且允许与 inputs 混排。
     #[test]
     fn parse_output_long_mixed() {
-        let args = crate::cli::CliArgs::try_parse_from([
-            "marktex",
-            "a.md",
-            "--output",
-            "out.tex",
-            "b.md",
-        ])
-        .unwrap();
-        assert_eq!(args.inputs, vec![PathBuf::from("a.md"), PathBuf::from("b.md")]);
+        let args =
+            crate::cli::CliArgs::try_parse_from(["marktex", "a.md", "--output", "out.tex", "b.md"])
+                .unwrap();
+        assert_eq!(
+            args.inputs,
+            vec![PathBuf::from("a.md"), PathBuf::from("b.md")]
+        );
         assert_eq!(args.output, Some(PathBuf::from("out.tex")));
+        assert_eq!(args.config, None);
     }
 
     // 行为：重复指定 -o 会报错。
     #[test]
     fn error_on_duplicate_output() {
         let err = crate::cli::CliArgs::try_parse_from([
-            "marktex",
-            "-o",
-            "a.tex",
-            "-o",
-            "b.tex",
-            "input.md",
+            "marktex", "-o", "a.tex", "-o", "b.tex", "input.md",
         ])
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);

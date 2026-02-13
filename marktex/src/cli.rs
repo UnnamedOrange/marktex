@@ -13,4 +13,7 @@ pub struct CliArgs {
 
     #[arg(short, long, value_name = "FILE")]
     pub output: Option<PathBuf>,
+
+    #[arg(long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
 }

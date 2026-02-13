@@ -23,7 +23,7 @@ fn golden_case(path: &Path) -> datatest_stable::Result<()> {
 
     let fixture_dir = path
         .parent()
-        .ok_or_else(|| "fixture input path should have a parent directory")?;
+        .ok_or("fixture input path should have a parent directory")?;
     let options = read_fixture_options(fixture_dir)?;
 
     let mut tex_files = fixture_dir

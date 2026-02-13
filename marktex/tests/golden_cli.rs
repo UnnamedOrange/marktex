@@ -36,7 +36,7 @@ fn append_optional_config_arg(cmd: &mut Command, fixture_dir: &Path) {
 fn golden_cli_case(path: &Path) -> datatest_stable::Result<()> {
     let fixture_dir = path
         .parent()
-        .ok_or_else(|| "fixture input path should have a parent directory")?;
+        .ok_or("fixture input path should have a parent directory")?;
     let expected = read_expected_tex(fixture_dir)?;
 
     let output = NamedTempFile::new()?;
